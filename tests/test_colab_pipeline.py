@@ -1,0 +1,97 @@
+"""Unit tests for the competition-only Colab Pro pipeline and notebook generator."""
+
+import ast
+import json
+from pathlib import Path
+
+import pytest
+
+from eahtr.colab_pipeline import (
+    COMPETITION_CANDIDATES,
+    assign_deterministic_split,
+    make_sham_derangement,
+    resolve_vision_modules_to_save,
+    validate_competition_candidate,
+    write_competition_colab_notebook,
+)
+
+
+def test_all_competition_candidates_pass_policy() -> None:
+    assert set(COMPETITION_CANDIDATES) == {
+        "gemma4_12b",
+        "gemma4_26b_a4b",
+        "inkling2_mini",
+        "qwen36_35b_a3b",
+    }
+    for spec in COMPETITION_CANDIDATES.values():
+        validate_competition_candidate(spec)
+
+
+def test_resolve_vision_modules_across_model_families() -> None:
+    gemma12b_modules = [
+        "model",
+        "model.embed_vision",
+        "model.embed_vision.patch_dense",
+        "model.embed_vision.multimodal_embedder",
+        "model.embed_vision.multimodal_embedder.embedding_projection",
+        "model.language_model.layers.0.self_attn.q_proj",
+    ]
+    assert resolve_vision_modules_to_save(
+        gemma12b_modules, COMPETITION_CANDIDATES["gemma4_12b"].vision_trainable_patterns
+    ) == ["model.embed_vision"]
+
+    gemma26b_modules = [
+        "model.vision_tower",
+        "model.vision_tower.encoder",
+        "model.multi_modal_projector",
+        "model.multi_modal_projector.linear",
+    ]
+    assert resolve_vision_modules_to_save(
+        gemma26b_modules, COMPETITION_CANDIDATES["gemma4_26b_a4b"].vision_trainable_patterns
+    ) == ["model.multi_modal_projector", "model.vision_tower"]
+
+    qwen_modules = [
+        "model.visual.merger",
+        "model.visual.merger.linear_fc1",
+        "model.visual.deepstack_merger_list",
+    ]
+    assert resolve_vision_modules_to_save(
+        qwen_modules, COMPETITION_CANDIDATES["qwen36_35b_a3b"].vision_trainable_patterns
+    ) == ["model.visual.deepstack_merger_list", "model.visual.merger"]
+
+    with pytest.raises(RuntimeError, match="Refusing frozen-vision run"):
+        resolve_vision_modules_to_save(
+            ["model.layers.0.q_proj"], COMPETITION_CANDIDATES["gemma4_12b"].vision_trainable_patterns
+        )
+
+
+def test_make_sham_derangement_zero_self_matches() -> None:
+    records = [{"record_id": f"r-{i}", "text": f"letter text {i}"} for i in range(12)]
+    sham = make_sham_derangement(records, seed=20261125)
+    assert len(sham) == len(records)
+    for orig, s in zip(records, sham, strict=True):
+        assert s["text"] != orig["text"]
+        assert s["sham_donor_record_id"] != orig["record_id"]
+        assert s["arm"] == "sham"
+
+
+def test_assign_deterministic_split_groups_consistently() -> None:
+    first = assign_deterministic_split("revcity:series_001")
+    second = assign_deterministic_split("revcity:series_001")
+    assert first == second
+
+    splits = {assign_deterministic_split(f"series_{i}") for i in range(200)}
+    assert splits == {"train", "val", "test_public"}
+
+
+def test_generated_notebook_valid_json_ast_and_public_only(tmp_path: Path) -> None:
+    nb_path = write_competition_colab_notebook(tmp_path / "test_colab.ipynb")
+    nb = json.loads(nb_path.read_text(encoding="utf-8"))
+    assert nb["nbformat"] == 4
+    assert len(nb["cells"]) == 8
+
+    for idx, cell in enumerate(nb["cells"]):
+        if cell["cell_type"] != "code":
+            continue
+        code_lines = [ln for ln in cell["source"] if not ln.lstrip().startswith("!")]
+        ast.parse("".join(code_lines), filename=f"cell_{idx}.py")

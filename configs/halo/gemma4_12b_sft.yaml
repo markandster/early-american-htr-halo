@@ -1,5 +1,5 @@
 # Template aligned with Halo docs; verify exact keys against Dec 1 Track Rules and Halo release commit.
-model_name_or_path: google/gemma-4-12b-it
+model_name_or_path: google/gemma-4-12B-it
 license: Apache-2.0
 task_type: vlm_sft
 

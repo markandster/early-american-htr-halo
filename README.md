@@ -55,13 +55,25 @@ All splits are gated by `eahtr.hygiene.audit_split_disjointness` for zero collis
 
 ```text
 ├── configs/halo/            # Halo SFT & Online/Offline GRPO YAML templates
+├── notebooks/               # Self-contained Colab Pro public-corpus SFT & rollout notebook
 ├── src/eahtr/
+│   ├── colab_pipeline.py    # Public-data Colab notebook generator & candidate specs
 │   ├── metrics.py           # Strict & lenient diplomatic WER/CER via rapidfuzz
 │   ├── rewards.py           # Deterministic GRPO archival reward & JSONL CLI scorer
 │   ├── hygiene.py           # Target normalization, slip/leader-dot filters, split audit
 │   └── corpus.py            # License allowlist gate & ALTO-XML line extractor
 └── tests/                   # Pytest unit suite covering metrics, rewards, hygiene, corpus
 ```
+
+---
+
+## Colab Pro Training & Halo Reproducibility
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/markandster/early-american-htr-halo/blob/main/notebooks/colab_competition_pretrain_sft.ipynb)
+
+The notebook [colab_competition_pretrain_sft.ipynb](notebooks/colab_competition_pretrain_sft.ipynb) mirrors our full-resolution (`max_pixels=2048*2048`), trainable-vision, matched-compute sham-controlled training harness while strictly enforcing **competition-cleared public datasets only** (`Revolutionary City` Zenodo `15776323` CC-BY-4.0, plus opt-in `Library of Congress By the People` Public Domain).
+
+> **Competition Rule Note:** Pre-December 1 Colab runs establish baseline benchmarks, target hygiene, vision-gradient verification, and Stage 2 offline-GRPO rollouts on the public dataset. Final competition submissions after December 1 must be reproduced end-to-end using the official **Halo** training recipe (`github.com/whitecircle/halo`) under published Track Rules.
 
 ---
 
