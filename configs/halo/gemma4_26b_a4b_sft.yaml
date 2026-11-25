@@ -1,33 +1,60 @@
-# Template aligned with Halo docs; verify exact keys against Dec 1 Track Rules and Halo release commit.
+# Halo VLM SFT — Gemma-4 26B-A4B-IT (MoE EP=8) on rights-cleared 18th-century diplomatic HTR.
+# Aligned with whitecircle/halo/examples/sft/gemma4/gemma4-26b-a4b-ultrachat-ep.yaml & gemma4.md.
+# Launch: torchrun --nproc_per_node=8 scripts/training/sft.py configs/halo/gemma4_26b_a4b_sft.yaml
+
+# --- Model ---
 model_name_or_path: google/gemma-4-26B-A4B-it
-license: Apache-2.0
-task_type: vlm_sft
+attn_implementation: sdpa  # required for Gemma-4 global_head_dim=512
+moe_balancing: none        # Gemma-4 has no native aux-loss term or EP bias-update path
 
-# Dataset (CC-BY-4.0 / Public Domain only)
-dataset_path: data/public_train.jsonl
-val_dataset_path: data/public_val.jsonl
-max_pixels: 4194304 # 2048 x 2048
-assistant_only_loss: true
-
-# MoE parallelism & LoRA
+# --- Parallelism & MoE precision ---
 expert_parallel_size: 8
+fp32_experts: true         # upcast precision-sensitive expert weights (omit fp32_non_ep_params & fp32_router)
+
+# --- Dataset (CC-BY-4.0 / Public Domain only) ---
+dataset:
+  - data/public_train.jsonl
+conversation_field: messages
+images_field: images
+test_size: 0.05
+
+# --- Sequence budget & VLM constraints ---
+packing: false
+max_length: 8192
+
+# --- Tokens & chat template ---
+train_on_completions_only: true
+assistant_message_template: "<|turn>model\n"
+pad_token: <pad>
+
+# --- PEFT ---
+# all-linear resolves into inner nn.Linear of Gemma4ClippableLinear vision layers too.
 use_peft: true
 lora_r: 16
 lora_alpha: 32
 lora_dropout: 0.05
-lora_target_modules:
-  - q_proj
-  - k_proj
-  - v_proj
-  - o_proj
-  - gate_proj
-  - up_proj
-  - down_proj
+lora_target_modules: all-linear
 
+# --- Training ---
 num_train_epochs: 1.5
 per_device_train_batch_size: 1
+per_device_eval_batch_size: 1
 gradient_accumulation_steps: 8
-learning_rate: 2.0e-5
-bf16: true
+learning_rate: 1.0e-4
+lr_scheduler_type: cosine
+warmup_steps: 0.05
 gradient_checkpointing: true
-output_dir: runs/gemma4_26b_a4b_sft
+gradient_checkpointing_kwargs:
+  use_reentrant: true
+
+# --- Checkpointing & logging ---
+output_dir: checkpoints/gemma4-26b-a4b-eahtr-sft
+eval_strategy: steps
+eval_steps: 100
+save_steps: 100
+save_total_limit: 2
+save_only_model: true
+logging_steps: 1
+logging_first_step: true
+remove_unused_columns: false
+dataloader_num_workers: 2

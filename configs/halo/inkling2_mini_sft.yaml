@@ -1,16 +1,32 @@
-# Template aligned with Halo docs; verify exact keys against Dec 1 Track Rules and Halo release commit.
+# Halo VLM SFT — Inkling-2-Mini (26.4B / 5.4B active, Apache-2.0) on public diplomatic HTR.
+# Aligned with whitecircle/halo (agent-docs/models/inkling2.md & agent-docs/training-methods/sft.md).
+# Launch: halo launch sft configs/halo/inkling2_mini_sft.yaml --nproc 2
+
+# --- Model ---
 model_name_or_path: thinkingmachines/Inkling-2-Mini
-license: Apache-2.0
-task_type: vlm_sft
+moe_balancing: none
+pad_token: "<|endoftext|>"  # Inkling 2 tokenizer ships no pad_token
 
-# Dataset (CC-BY-4.0 / Public Domain only)
-dataset_path: data/public_train.jsonl
-val_dataset_path: data/public_val.jsonl
-max_pixels: 4194304 # 2048 x 2048
-assistant_only_loss: true
+# --- Parallelism ---
+expert_parallel_size: 2
 
-# Looped MoE VLM adaptation
-expert_parallel_size: 8
+# --- Dataset (CC-BY-4.0 / Public Domain only) ---
+dataset:
+  - data/public_train.jsonl
+conversation_field: messages
+images_field: images
+test_size: 0.05
+
+# --- Sequence budget & VLM constraints ---
+packing: false
+max_length: 8192
+
+# --- Tokens & chat template ---
+train_on_completions_only: true
+assistant_message_template: "<|message_model|>"
+
+# --- PEFT ---
+# Inkling 2 attention includes r_proj (learned relative-logits bias) alongside q/k/v/o.
 use_peft: true
 lora_r: 16
 lora_alpha: 32
@@ -19,12 +35,29 @@ lora_target_modules:
   - q_proj
   - k_proj
   - v_proj
+  - r_proj
   - o_proj
 
+# --- Training ---
 num_train_epochs: 1.5
 per_device_train_batch_size: 1
+per_device_eval_batch_size: 1
 gradient_accumulation_steps: 8
-learning_rate: 1.5e-5
-bf16: true
+learning_rate: 5.0e-5
+lr_scheduler_type: cosine
+warmup_steps: 0.05
 gradient_checkpointing: true
-output_dir: runs/inkling2_mini_sft
+gradient_checkpointing_kwargs:
+  use_reentrant: true
+
+# --- Checkpointing & logging ---
+output_dir: checkpoints/inkling2-mini-eahtr-sft
+eval_strategy: steps
+eval_steps: 100
+save_steps: 100
+save_total_limit: 2
+save_only_model: true
+logging_steps: 1
+logging_first_step: true
+remove_unused_columns: false
+dataloader_num_workers: 2

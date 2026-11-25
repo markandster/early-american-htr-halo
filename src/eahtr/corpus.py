@@ -43,6 +43,29 @@ def parse_alto_xml_lines(xml_text: str) -> list[str]:
     return lines
 
 
+def parse_page_xml_lines(xml_text: str) -> list[str]:
+    """Extract ordered line strings from a namespace-agnostic PAGE-XML document."""
+    root = ET.fromstring(xml_text)
+    lines: list[str] = []
+    for elem in root.iter():
+        if _local_tag(elem.tag) != "TextLine":
+            continue
+        line_text = ""
+        for child in elem.iter():
+            if _local_tag(child.tag) == "TextEquiv":
+                for sub in child:
+                    if _local_tag(sub.tag) == "Unicode" and sub.text:
+                        cand = sub.text.strip()
+                        if cand:
+                            line_text = cand
+                            break
+                if line_text:
+                    break
+        if line_text:
+            lines.append(line_text)
+    return lines
+
+
 def filter_corpus_record(record: dict) -> tuple[bool, str]:
     """Validate license provenance, target cleanliness, and anti-loop record hygiene."""
     source_name = str(record.get("source_name", "unknown"))

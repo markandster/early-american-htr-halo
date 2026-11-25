@@ -1,6 +1,7 @@
 """Early American HTR post-training utilities for Halo."""
 
 from .colab_pipeline import (
+    BENTHAM_ICFHR2016_ZENODO_URL,
     COMPETITION_CANDIDATES,
     DIPLOMATIC_PROMPT,
     CompetitionCandidateSpec,
@@ -11,7 +12,13 @@ from .colab_pipeline import (
     validate_competition_candidate,
     write_competition_colab_notebook,
 )
-from .corpus import ALLOWED_LICENSES, filter_corpus_record, parse_alto_xml_lines, verify_source_license
+from .corpus import (
+    ALLOWED_LICENSES,
+    filter_corpus_record,
+    parse_alto_xml_lines,
+    parse_page_xml_lines,
+    verify_source_license,
+)
 from .hf_dataset import (
     build_hf_dataset_card,
     push_splits_to_hf_hub,
@@ -39,6 +46,7 @@ __all__ = [
     "ALLOWED_LICENSES",
     "ArchivalRewardConfig",
     "ArchivalRewardResult",
+    "BENTHAM_ICFHR2016_ZENODO_URL",
     "COMPETITION_CANDIDATES",
     "CompetitionCandidateSpec",
     "DIPLOMATIC_PROMPT",
@@ -58,6 +66,7 @@ __all__ = [
     "normalize_lenient",
     "normalize_strict",
     "parse_alto_xml_lines",
+    "parse_page_xml_lines",
     "push_splits_to_hf_hub",
     "resolve_vision_modules_to_save",
     "score_group_completions",

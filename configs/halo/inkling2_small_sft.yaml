@@ -1,0 +1,66 @@
+# Halo VLM SFT — Inkling-2-Small (NVFP4/MXFP8 frozen quantized experts, EP=2) on public HTR.
+# Aligned with whitecircle/halo (agent-docs/models/inkling2.md).
+# Note: Saved adapters must be converted with `halo run export-engine-adapter` before serving on vLLM.
+# Launch: halo launch sft configs/halo/inkling2_small_sft.yaml --nproc 2
+
+# --- Model ---
+model_name_or_path: thinkingmachines/Inkling-2-Small
+moe_balancing: none
+pad_token: "<|endoftext|>"
+
+# --- Parallelism & frozen quantized experts (mandatory for shipped NVFP4/MXFP8 release) ---
+expert_parallel_size: 2
+expert_tensor_parallel_size: 1
+frozen_quantized_experts: true
+ep_lazy_loading: true
+merge_expert_lora_on_save: false
+
+# --- Dataset (CC-BY-4.0 / Public Domain only) ---
+dataset:
+  - data/public_train.jsonl
+conversation_field: messages
+images_field: images
+test_size: 0.05
+
+# --- Sequence budget & VLM constraints ---
+packing: false
+max_length: 8192
+
+# --- Tokens & chat template ---
+train_on_completions_only: true
+assistant_message_template: "<|message_model|>"
+
+# --- PEFT ---
+# Halo requires pairing expert adapters with o_proj (expert LoRA alone is refused).
+use_peft: true
+lora_r: 8
+lora_alpha: 16
+lora_dropout: 0.0
+lora_target_modules:
+  - o_proj
+  - gate_up_proj
+  - down_proj
+
+# --- Training ---
+num_train_epochs: 1.0
+per_device_train_batch_size: 1
+per_device_eval_batch_size: 1
+gradient_accumulation_steps: 8
+learning_rate: 5.0e-5
+lr_scheduler_type: cosine
+warmup_steps: 0.05
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  use_reentrant: true
+
+# --- Checkpointing & logging ---
+output_dir: checkpoints/inkling2-small-eahtr-sft
+eval_strategy: steps
+eval_steps: 100
+save_steps: 100
+save_total_limit: 2
+save_only_model: true
+logging_steps: 1
+logging_first_step: true
+remove_unused_columns: false
+dataloader_num_workers: 2

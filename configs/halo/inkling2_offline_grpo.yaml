@@ -1,0 +1,66 @@
+# Halo Offline GRPO — Inkling-2-Small (frozen NVFP4/MXFP8 experts, EP=2) on archival HTR rollouts.
+# Aligned with whitecircle/halo (agent-docs/models/inkling2.md).
+# Note: Standard online GRPO is refused on Inkling 2 (weight_sync_refusal); offline GRPO requires no server.
+# Launch: halo launch grpo/offline configs/halo/inkling2_offline_grpo.yaml --nproc 2
+
+# --- Model ---
+model_name_or_path: thinkingmachines/Inkling-2-Small
+moe_balancing: none
+pad_token: "<|endoftext|>"
+
+# --- Parallelism & frozen quantized experts ---
+expert_parallel_size: 2
+expert_tensor_parallel_size: 1
+frozen_quantized_experts: true
+ep_lazy_loading: true
+merge_expert_lora_on_save: false
+
+# --- Dataset (pre-scored with eahtr.rewards) ---
+dataset:
+  - data/scored_offline_grpo_rollouts.jsonl
+test_size: 0.05
+
+# --- Offline GRPO hyperparameters ---
+loss_type: bnpo
+initial_min_log_prob: -0.5
+use_chunked_grpo_logprobs: true  # required for Inkling 2's 201k vocabulary
+
+# --- PEFT ---
+use_peft: true
+lora_r: 8
+lora_alpha: 16
+lora_dropout: 0.0
+lora_target_modules:
+  - o_proj
+  - gate_up_proj
+  - down_proj
+
+# --- Training ---
+per_device_train_batch_size: 1
+per_device_eval_batch_size: 1
+num_train_epochs: 1.0
+gradient_accumulation_steps: 8
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  use_reentrant: true
+learning_rate: 5.0e-6
+weight_decay: 0.01
+lr_scheduler_type: cosine
+warmup_steps: 10
+
+# --- Sequence lengths ---
+max_prompt_length: 2048
+max_completion_length: 2048
+
+# --- Checkpointing & logging ---
+output_dir: checkpoints/inkling2-archival-grpo-offline
+save_steps: 50
+eval_strategy: steps
+eval_steps: 50
+save_total_limit: 2
+save_only_model: true
+logging_steps: 1
+logging_first_step: true
+dataloader_num_workers: 2
+remove_unused_columns: false
+dataloader_drop_last: true

@@ -1,20 +1,55 @@
-# Template aligned with Halo grpo/offline; verify exact keys against Dec 1 Track Rules and Halo release commit.
-model_name_or_path: runs/gemma4_12b_sft/merged
-dataset: data/scored_offline_grpo_rollouts.jsonl
-prompt_field: prompt
-completion_field: completion
-reward_field: reward
+# Halo Offline GRPO — Gemma-4 26B-A4B / 12B on pre-scored archival HTR rollouts (eahtr.rewards).
+# Aligned with whitecircle/halo/examples/grpo/offline/gemma4/offline-grpo-gemma4-26b-a4b-gsm8k.yaml.
+# Dataset rows: {"prompt": ..., "completions": [...], "rewards": [...]} from Cell 7 / eahtr.rewards.
+# Launch: torchrun --nproc_per_node=8 scripts/training/grpo/offline.py configs/halo/archival_grpo_offline.yaml
 
-learning_rate: 5.0e-6
+# --- Model ---
+model_name_or_path: checkpoints/gemma4-26b-a4b-eahtr-sft
+attn_implementation: sdpa
+moe_balancing: none
+
+# --- Parallelism ---
+expert_parallel_size: 8
+
+# --- Dataset ---
+dataset:
+  - data/scored_offline_grpo_rollouts.jsonl
+test_size: 0.05
+
+# --- Offline GRPO hyperparameters ---
+loss_type: bnpo
+initial_min_log_prob: -0.5
+
+# --- Training ---
 per_device_train_batch_size: 1
+per_device_eval_batch_size: 1
+num_train_epochs: 1.0
 gradient_accumulation_steps: 8
-num_generations: 8
-max_prompt_length: 4096
-max_completion_length: 2048
-beta: 0.03
-scale_rewards: group
-bf16: true
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  use_reentrant: true
+learning_rate: 5.0e-6
+weight_decay: 0.01
+lr_scheduler_type: cosine
+warmup_steps: 10
 
-output_dir: runs/archival_grpo_offline
-save_strategy: steps
+# --- Sequence lengths ---
+max_prompt_length: 2048
+max_completion_length: 2048
+
+# --- Checkpointing & logging ---
+output_dir: checkpoints/archival-grpo-offline
 save_steps: 50
+eval_strategy: steps
+eval_steps: 50
+save_total_limit: 2
+save_only_model: true
+logging_steps: 1
+logging_first_step: true
+num_eval_examples: 10
+dataloader_num_workers: 2
+remove_unused_columns: false
+dataloader_drop_last: true
+
+# --- PEFT ---
+use_peft: false

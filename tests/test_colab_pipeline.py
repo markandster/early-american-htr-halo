@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 import pytest
+import yaml
 
 from eahtr.colab_pipeline import (
     COMPETITION_CANDIDATES,
@@ -24,6 +25,7 @@ def test_all_competition_candidates_pass_policy() -> None:
         "inkling2_mini",
         "qwen36_35b_a3b",
     }
+    assert "r_proj" in COMPETITION_CANDIDATES["inkling2_mini"].lora_target_modules
     for spec in COMPETITION_CANDIDATES.values():
         validate_competition_candidate(spec)
 
@@ -117,6 +119,8 @@ def test_generated_notebook_valid_json_ast_and_public_only(tmp_path: Path) -> No
     assert "userdata" in raw_text
     assert "should_use_4bit" in raw_text
     assert "PUBLISH_TO_HF_DATASET" in raw_text
+    assert "INCLUDE_BENTHAM" in raw_text
+    assert "parse_page_xml_lines" in raw_text
 
     nb = json.loads(raw_text)
     assert nb["nbformat"] == 4
@@ -127,3 +131,39 @@ def test_generated_notebook_valid_json_ast_and_public_only(tmp_path: Path) -> No
             continue
         code_lines = [ln for ln in cell["source"] if not ln.lstrip().startswith("!")]
         ast.parse("".join(code_lines), filename=f"cell_{idx}.py")
+
+
+def test_halo_yaml_configs_match_schema_and_ink2_rules() -> None:
+    config_dir = Path(__file__).resolve().parents[1] / "configs" / "halo"
+    expected_files = {
+        "gemma4_12b_sft.yaml",
+        "gemma4_26b_a4b_sft.yaml",
+        "inkling2_mini_sft.yaml",
+        "inkling2_small_sft.yaml",
+        "archival_grpo_offline.yaml",
+        "inkling2_offline_grpo.yaml",
+        "archival_grpo_online.yaml",
+    }
+    yaml_files = [p for p in config_dir.glob("*.yaml") if not p.name.startswith("._")]
+    assert {p.name for p in yaml_files} == expected_files
+
+    refused_keys = {"assistant_only_loss", "completion_only_loss", "max_pixels", "warmup_ratio"}
+    loaded = {}
+    for p in yaml_files:
+        cfg = yaml.safe_load(p.read_text(encoding="utf-8"))
+        assert isinstance(cfg, dict)
+        assert not (refused_keys & set(cfg)), f"{p.name} contains Halo startup-refused keys"
+        loaded[p.name] = cfg
+
+    for name in ("gemma4_12b_sft.yaml", "gemma4_26b_a4b_sft.yaml"):
+        assert loaded[name]["attn_implementation"] == "sdpa"
+        assert loaded[name]["lora_target_modules"] == "all-linear"
+        assert loaded[name]["train_on_completions_only"] is True
+
+    for name in ("inkling2_mini_sft.yaml", "inkling2_small_sft.yaml", "inkling2_offline_grpo.yaml"):
+        assert loaded[name]["pad_token"] == "<|endoftext|>"
+
+    assert "r_proj" in loaded["inkling2_mini_sft.yaml"]["lora_target_modules"]
+    for name in ("inkling2_small_sft.yaml", "inkling2_offline_grpo.yaml"):
+        assert loaded[name]["frozen_quantized_experts"] is True
+        assert "o_proj" in loaded[name]["lora_target_modules"]

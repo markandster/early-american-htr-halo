@@ -2,7 +2,12 @@
 
 import pytest
 
-from eahtr.corpus import filter_corpus_record, parse_alto_xml_lines, verify_source_license
+from eahtr.corpus import (
+    filter_corpus_record,
+    parse_alto_xml_lines,
+    parse_page_xml_lines,
+    verify_source_license,
+)
 from eahtr.hygiene import (
     audit_split_disjointness,
     clean_diplomatic_target,
@@ -59,6 +64,28 @@ def test_parse_alto_xml_lines_extracts_ordered_text() -> None:
     </alto>
     """
     assert parse_alto_xml_lines(alto) == ["Head Quarters", "July 1779"]
+
+
+def test_parse_page_xml_lines_extracts_ordered_text() -> None:
+    page_xml = """<?xml version="1.0" encoding="UTF-8"?>
+    <PcGts xmlns="http://schema.primaresearch.org/PAGE/gts/pagecontent/2013-07-15">
+      <Page imageFilename="bentham_001.jpg" imageWidth="1000" imageHeight="1500">
+        <TextRegion id="r1">
+          <TextLine id="l1">
+            <Coords points="0,0 100,0 100,20 0,20"/>
+            <TextEquiv><Unicode>Mr. Bentham observes</Unicode></TextEquiv>
+          </TextLine>
+          <TextLine id="l2">
+            <TextEquiv><Unicode>that Public Utility is supreme.</Unicode></TextEquiv>
+          </TextLine>
+        </TextRegion>
+      </Page>
+    </PcGts>
+    """
+    assert parse_page_xml_lines(page_xml) == [
+        "Mr. Bentham observes",
+        "that Public Utility is supreme.",
+    ]
 
 
 def test_filter_corpus_record_gates() -> None:

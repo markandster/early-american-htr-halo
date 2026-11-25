@@ -21,6 +21,7 @@ DIPLOMATIC_PROMPT = (
 
 REVCITY_ZENODO_URL = "https://zenodo.org/api/records/15776323/files/revcity-htr.zip/content"
 LOC_WASHINGTON_ITEM_JSON_URL = "https://www.loc.gov/item/2020446971/?fo=json"
+BENTHAM_ICFHR2016_ZENODO_URL = "https://zenodo.org/api/records/1164045/files/Train-And-Val-ICFHR-2016.tgz/content"
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,7 +90,7 @@ COMPETITION_CANDIDATES: dict[str, CompetitionCandidateSpec] = {
         license="Apache-2.0",
         params_b=26.4,
         active_params_b=5.4,
-        lora_target_modules=("q_proj", "k_proj", "v_proj", "o_proj"),
+        lora_target_modules=("q_proj", "k_proj", "v_proj", "r_proj", "o_proj"),
         vision_trainable_patterns=(
             "vision_projection",
             "multi_modal_projector",
@@ -281,6 +282,7 @@ import os
 import random
 import re
 import subprocess
+import tarfile
 import time
 import zipfile
 from collections import Counter
@@ -315,6 +317,7 @@ else:
 subprocess.run(['pip', 'install', '-q', '--no-deps', '-e', str(REPO_DIR)], check=True)
 
 from eahtr.colab_pipeline import (
+    BENTHAM_ICFHR2016_ZENODO_URL,
     COMPETITION_CANDIDATES,
     DIPLOMATIC_PROMPT,
     LOC_WASHINGTON_ITEM_JSON_URL,
@@ -325,7 +328,7 @@ from eahtr.colab_pipeline import (
     should_use_4bit,
     validate_competition_candidate,
 )
-from eahtr.corpus import filter_corpus_record, parse_alto_xml_lines
+from eahtr.corpus import filter_corpus_record, parse_alto_xml_lines, parse_page_xml_lines
 from eahtr.hf_dataset import push_splits_to_hf_hub
 from eahtr.hygiene import audit_split_disjointness, clean_diplomatic_target
 from eahtr.metrics import normalize_strict, score_pair
@@ -381,6 +384,10 @@ TEST_FRACTION = 0.075
 # Optional Public Domain LOC By the People (LCCN 2020446971) polite fetcher
 INCLUDE_LOC_BY_THE_PEOPLE = False
 LOC_MAX_PAGES = 150  # Polite cap when enabled
+
+# Optional CC-BY-4.0 Bentham ICFHR-2016 HTR corpus (Zenodo 1164045)
+INCLUDE_BENTHAM = False
+BENTHAM_MAX_PAGES = 200  # Cap when enabled
 
 # Training hyperparameters (full-resolution trainable-vision SFT setup)
 SEED = 20261125
@@ -603,6 +610,87 @@ if INCLUDE_LOC_BY_THE_PEOPLE:
             })
             corpus_report[f'loc_admitted_{split}'] += 1
             loc_added += 1
+
+if INCLUDE_BENTHAM:
+    bentham_dir = WORK_ROOT / 'bentham'
+    bentham_tgz = bentham_dir / 'icfhr2016.tgz'
+    bentham_pages = bentham_dir / 'pages'
+    bentham_pages.mkdir(parents=True, exist_ok=True)
+    download_with_retry(BENTHAM_ICFHR2016_ZENODO_URL, bentham_tgz, min_existing_bytes=100_000_000)
+
+    bentham_added = 0
+    with tarfile.open(bentham_tgz, 'r:gz') as tf:
+        members = [m for m in tf.getmembers() if m.isfile()]
+        by_stem = {}
+        for m in members:
+            ext = Path(m.name).suffix.lower()
+            stem = Path(m.name).stem.lower()
+            if ext in {'.jpg', '.jpeg', '.png'}:
+                by_stem.setdefault(stem, {})['img'] = m
+            elif ext == '.xml':
+                by_stem.setdefault(stem, {})['xml'] = m
+            elif ext == '.txt':
+                by_stem.setdefault(stem, {})['txt'] = m
+
+        for stem in sorted(by_stem):
+            if bentham_added >= BENTHAM_MAX_PAGES:
+                break
+            entry = by_stem[stem]
+            if 'img' not in entry or ('xml' not in entry and 'txt' not in entry):
+                continue
+            raw_text = ''
+            if 'xml' in entry:
+                xml_str = tf.extractfile(entry['xml']).read().decode('utf-8', errors='replace')
+                try:
+                    lines = parse_page_xml_lines(xml_str)
+                    if not lines:
+                        lines = parse_alto_xml_lines(xml_str)
+                    raw_text = '\\n'.join(lines)
+                except Exception:
+                    corpus_report['bentham_xml_parse_error'] += 1
+                    continue
+            else:
+                raw_text = tf.extractfile(entry['txt']).read().decode('utf-8', errors='replace')
+
+            accepted, reason = filter_corpus_record({
+                'source_name': 'Bentham ICFHR2016',
+                'license': 'CC-BY-4.0',
+                'text': raw_text,
+            })
+            if not accepted:
+                corpus_report[f'bentham_{reason}'] += 1
+                continue
+            cleaned_text = clean_diplomatic_target(raw_text)
+            if len(cleaned_text.split()) < 3:
+                corpus_report['bentham_dropped_too_short'] += 1
+                continue
+
+            img_bytes = tf.extractfile(entry['img']).read()
+            img_sha = hashlib.sha256(img_bytes).hexdigest()
+            img_ext = Path(entry['img'].name).suffix.lower()
+            safe_stem = re.sub(r'[^a-zA-Z0-9._-]+', '_', stem)
+            img_out = bentham_pages / f'{safe_stem}{img_ext}'
+            if not img_out.exists():
+                img_out.write_bytes(img_bytes)
+
+            group_key = re.sub(r'[-_]\\d+$', '', safe_stem)
+            split = assign_deterministic_split(
+                f'bentham:{group_key}', val_fraction=VAL_FRACTION, test_fraction=TEST_FRACTION
+            )
+            all_records_by_split[split].append({
+                'record_id': f'bentham-{safe_stem}',
+                'collection': 'bentham-icfhr2016-zenodo-1164045',
+                'document_id': f'bentham:{group_key}',
+                'writer_key': f'bentham_series:{group_key}',
+                'image_path': str(img_out),
+                'image_sha256': img_sha,
+                'text': cleaned_text,
+                'word_count': len(cleaned_text.split()),
+                'license': 'CC-BY-4.0',
+                'split': split,
+            })
+            corpus_report[f'bentham_admitted_{split}'] += 1
+            bentham_added += 1
 
 train_rows = all_records_by_split['train']
 val_rows = all_records_by_split['val']
