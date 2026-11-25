@@ -86,7 +86,12 @@ def test_assign_deterministic_split_groups_consistently() -> None:
 
 def test_generated_notebook_valid_json_ast_and_public_only(tmp_path: Path) -> None:
     nb_path = write_competition_colab_notebook(tmp_path / "test_colab.ipynb")
-    nb = json.loads(nb_path.read_text(encoding="utf-8"))
+    raw_text = nb_path.read_text(encoding="utf-8")
+    assert "SMOKE_TEST_MODE" in raw_text
+    assert "AutoModelForMultimodalLM" in raw_text
+    assert "userdata" in raw_text
+
+    nb = json.loads(raw_text)
     assert nb["nbformat"] == 4
     assert len(nb["cells"]) == 8
 

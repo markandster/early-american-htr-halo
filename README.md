@@ -1,5 +1,8 @@
 # Early American HTR — Halo Post-Training (`early-american-htr-halo`)
 
+[![CI](https://github.com/markandster/early-american-htr-halo/actions/workflows/ci.yml/badge.svg)](https://github.com/markandster/early-american-htr-halo/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+
 Standalone **Apache-2.0** post-training toolkit, corpus hygiene pipeline, and verifiable GRPO (RLVR) reward framework for **writer-general 18th-century American diplomatic handwriting recognition** (c. 1750–1800 English round hand), designed for [White Circle Halo](https://github.com/whitecircle/halo) and local Apple Silicon (M3 Max 36 GB, MLX) inference.
 
 ---
@@ -62,8 +65,10 @@ All splits are gated by `eahtr.hygiene.audit_split_disjointness` for zero collis
 ## Repository Layout
 
 ```text
+├── .github/workflows/ci.yml # Automated pytest, YAML, and notebook AST checks
 ├── configs/halo/            # Halo SFT & Online/Offline GRPO YAML templates
 ├── notebooks/               # Self-contained Colab Pro public-corpus SFT & rollout notebook
+├── results/                 # Public benchmark & ablation ledger (held-out public splits)
 ├── src/eahtr/
 │   ├── colab_pipeline.py    # Public-data Colab notebook generator & candidate specs
 │   ├── metrics.py           # Strict & lenient diplomatic WER/CER via rapidfuzz
@@ -80,6 +85,9 @@ All splits are gated by `eahtr.hygiene.audit_split_disjointness` for zero collis
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/markandster/early-american-htr-halo/blob/main/notebooks/colab_competition_pretrain_sft.ipynb)
 
 The notebook [colab_competition_pretrain_sft.ipynb](notebooks/colab_competition_pretrain_sft.ipynb) mirrors our full-resolution (`max_pixels=2048*2048`), trainable-vision, matched-compute sham-controlled training harness while strictly enforcing **competition-cleared public datasets only** (`Revolutionary City` Zenodo `15776323` CC-BY-4.0, plus opt-in `Library of Congress By the People` Public Domain).
+
+- **First-run smoke test:** `SMOKE_TEST_MODE = True` is enabled by default in Cell 3 (400 RevCity pages, 1 epoch, 128-presentation sham control) so you can verify end-to-end CUDA, processor, vision-gradient flow, and evaluation in ~15–25 minutes before flipping `SMOKE_TEST_MODE = False` for the full ~3,200-page run.
+- **Hugging Face access:** For gated Gemma 4 checkpoints (`google/gemma-4-12B-it`), accept the model terms on Hugging Face and store `HF_TOKEN` in Colab Secrets (the notebook reads `userdata.get('HF_TOKEN')` automatically). `thinkingmachines/Inkling-2-Mini` is ungated.
 
 > **Competition Rule Note:** Pre-December 1 Colab runs establish baseline benchmarks, target hygiene, vision-gradient verification, and Stage 2 offline-GRPO rollouts on the public dataset. Final competition submissions after December 1 must be reproduced end-to-end using the official **Halo** training recipe (`github.com/whitecircle/halo`) under published Track Rules.
 

@@ -278,15 +278,18 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 import torch
+import transformers
 from PIL import Image
 from rapidfuzz.distance import Levenshtein
 from tqdm.auto import tqdm
+from huggingface_hub import login as hf_login
 from transformers import (
     AutoModelForImageTextToText,
     AutoProcessor,
     BitsAndBytesConfig,
     get_cosine_schedule_with_warmup,
 )
+AutoModelForMultimodalLM = getattr(transformers, 'AutoModelForMultimodalLM', None)
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 
 from google.colab import drive
@@ -319,8 +322,24 @@ assert torch.cuda.is_available(), 'CUDA GPU required (select L4 24GB, A100 40GB,
 GPU_NAME = torch.cuda.get_device_name(0)
 VRAM_GB = round(torch.cuda.get_device_properties(0).total_memory / 1e9, 2)
 print(f'GPU: {GPU_NAME} | VRAM: {VRAM_GB} GB | PyTorch: {torch.__version__}')
-if not os.environ.get('HF_TOKEN'):
-    print('NOTE: HF_TOKEN not set in env. If a Hugging Face model requires gated access, set os.environ["HF_TOKEN"] or login via huggingface-cli.')
+
+hf_token = os.environ.get('HF_TOKEN')
+if not hf_token:
+    try:
+        from google.colab import userdata
+        hf_token = userdata.get('HF_TOKEN')
+    except Exception:
+        hf_token = None
+if hf_token:
+    os.environ['HF_TOKEN'] = hf_token
+    hf_login(token=hf_token, add_to_git_credential=False)
+    print('Hugging Face authenticated via HF_TOKEN.')
+else:
+    print(
+        'NOTE: HF_TOKEN not set in env or Colab Secrets. '
+        'Gemma 4 checkpoints (e.g. https://huggingface.co/google/gemma-4-12B-it) are gated and require accepting terms + HF_TOKEN; '
+        'thinkingmachines/Inkling-2-Mini is ungated.'
+    )
 """
 
     cell_3_config = """
@@ -330,15 +349,19 @@ WORK_ROOT = Path('/content/eahtr_work')
 OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
 WORK_ROOT.mkdir(parents=True, exist_ok=True)
 
+# Set SMOKE_TEST_MODE = True for a ~15-25 min end-to-end validation run first;
+# switch to False for the full ~3,200-page public dataset run.
+SMOKE_TEST_MODE = True
+
 # Select which Apache-2.0 competition candidates to run:
 # Available keys: ['gemma4_12b', 'gemma4_26b_a4b', 'inkling2_mini', 'qwen36_35b_a3b']
 CANDIDATE_KEYS = ['gemma4_12b']
 ARMS = ['baseline_zeroshot', 'real', 'sham_short']
-SHAM_MAX_PRESENTATIONS = 504
+SHAM_MAX_PRESENTATIONS = 128 if SMOKE_TEST_MODE else 504
 
 # Public rights-cleared datasets (CC-BY-4.0 / Public Domain ONLY)
 INCLUDE_REVCITY = True
-REVCITY_MAX_PAGES = None  # Set e.g. 400 for a quick smoke test; None = full ~3,200 CC-BY-4.0 pages
+REVCITY_MAX_PAGES = 400 if SMOKE_TEST_MODE else None
 VAL_FRACTION = 0.075
 TEST_FRACTION = 0.075
 
@@ -348,7 +371,7 @@ LOC_MAX_PAGES = 150  # Polite cap when enabled
 
 # Training hyperparameters (mirrors proven Phase 4B full-res setup)
 SEED = 20261125
-EPOCHS = 2
+EPOCHS = 1 if SMOKE_TEST_MODE else 2
 LORA_RANK = 16
 LORA_ALPHA = 32
 LORA_DROPOUT = 0.05
@@ -359,8 +382,8 @@ WARMUP_RATIO = 0.05
 GRAD_ACCUM_STEPS = 8
 MAX_SEQ_LEN = 2048
 MAX_EVAL_NEW_TOKENS = 1536
-VAL_EVAL_MAX_PAGES = 48
-TEST_EVAL_MAX_PAGES = 64  # Set None to evaluate the entire held-out public test split
+VAL_EVAL_MAX_PAGES = 24 if SMOKE_TEST_MODE else 48
+TEST_EVAL_MAX_PAGES = 32 if SMOKE_TEST_MODE else 64  # Set None for entire held-out public test split
 
 # Offline GRPO rollout generation (Cell 7)
 GENERATE_OFFLINE_GRPO_ROLLOUTS = False
@@ -369,7 +392,7 @@ GRPO_NUM_GENERATIONS = 4
 
 for k in CANDIDATE_KEYS:
     validate_competition_candidate(COMPETITION_CANDIDATES[k])
-print('Validated candidates:', CANDIDATE_KEYS, '| arms:', ARMS)
+print('SMOKE_TEST_MODE:', SMOKE_TEST_MODE, '| candidates:', CANDIDATE_KEYS, '| arms:', ARMS)
 """
 
     cell_4_corpus = """
@@ -613,6 +636,23 @@ def load_processor_fullres(spec_dict: dict):
         return proc
 
 
+def load_vlm_model(hf_repo: str, load_kwargs: dict):
+    # Load VLM via AutoModelForMultimodalLM or AutoModelForImageTextToText cleanly.
+    prefer_multimodal = 'inkling' in hf_repo.lower() and AutoModelForMultimodalLM is not None
+    loaders = (
+        [AutoModelForMultimodalLM, AutoModelForImageTextToText]
+        if prefer_multimodal
+        else [cls for cls in (AutoModelForImageTextToText, AutoModelForMultimodalLM) if cls is not None]
+    )
+    last_err = None
+    for cls in loaders:
+        try:
+            return cls.from_pretrained(hf_repo, **load_kwargs)
+        except (ValueError, KeyError, TypeError) as exc:
+            last_err = exc
+    raise last_err
+
+
 def build_training_batch(processor, image: Image.Image, target_text: str, device):
     user_msgs = [{'role': 'user', 'content': [{'type': 'image'}, {'type': 'text', 'text': DIPLOMATIC_PROMPT}]}]
     full_msgs = user_msgs + [{'role': 'assistant', 'content': [{'type': 'text', 'text': target_text}]}]
@@ -739,7 +779,7 @@ def run_candidate_arm(cand_key: str, arm: str, arm_train_rows: list[dict], val_s
             bnb_4bit_compute_dtype=torch.bfloat16,
         )
 
-    model = AutoModelForImageTextToText.from_pretrained(spec.hf_repo, **load_kwargs)
+    model = load_vlm_model(spec.hf_repo, load_kwargs)
 
     if arm == 'baseline_zeroshot':
         eval_res = run_eval_panel(model, processor, test_slice, panel_name=f'{cand_key}-zeroshot-public-test')
@@ -763,10 +803,15 @@ def run_candidate_arm(cand_key: str, arm: str, arm_train_rows: list[dict], val_s
         model.gradient_checkpointing_enable()
         model.enable_input_require_grads()
 
-    vision_modules = resolve_vision_modules_to_save(
-        (n for n, _ in model.named_modules()),
-        spec.vision_trainable_patterns,
-    )
+    try:
+        vision_modules = resolve_vision_modules_to_save(
+            (n for n, _ in model.named_modules()),
+            spec.vision_trainable_patterns,
+        )
+    except RuntimeError as exc:
+        top_names = sorted({n.split('.')[0] for n, _ in model.named_modules() if n})[:20]
+        print('Module inspection failed. Top-level modules:', top_names)
+        raise exc
     print('Resolved trainable vision modules:', vision_modules)
     lora_cfg = LoraConfig(
         r=LORA_RANK,
@@ -936,7 +981,7 @@ if GENERATE_OFFLINE_GRPO_ROLLOUTS:
     assert adapter_dir.is_dir(), f'Train real adapter first: {adapter_dir}'
 
     processor = load_processor_fullres({'hf_repo': spec.hf_repo, 'max_pixels': spec.max_pixels, 'trust_remote_code': spec.trust_remote_code})
-    base_model = AutoModelForImageTextToText.from_pretrained(spec.hf_repo, device_map='auto', torch_dtype=torch.bfloat16, trust_remote_code=spec.trust_remote_code)
+    base_model = load_vlm_model(spec.hf_repo, {'device_map': 'auto', 'torch_dtype': torch.bfloat16, 'trust_remote_code': spec.trust_remote_code})
     model = PeftModel.from_pretrained(base_model, str(adapter_dir))
     model.eval()
 
