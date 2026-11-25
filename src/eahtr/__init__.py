@@ -7,10 +7,16 @@ from .colab_pipeline import (
     assign_deterministic_split,
     make_sham_derangement,
     resolve_vision_modules_to_save,
+    should_use_4bit,
     validate_competition_candidate,
     write_competition_colab_notebook,
 )
 from .corpus import ALLOWED_LICENSES, filter_corpus_record, parse_alto_xml_lines, verify_source_license
+from .hf_dataset import (
+    build_hf_dataset_card,
+    push_splits_to_hf_hub,
+    validate_records_for_public_publish,
+)
 from .hygiene import (
     audit_split_disjointness,
     clean_diplomatic_target,
@@ -39,6 +45,7 @@ __all__ = [
     "ScoreBreakdown",
     "assign_deterministic_split",
     "audit_split_disjointness",
+    "build_hf_dataset_card",
     "clean_diplomatic_target",
     "count_editorial_leaks",
     "count_modernizations",
@@ -51,11 +58,14 @@ __all__ = [
     "normalize_lenient",
     "normalize_strict",
     "parse_alto_xml_lines",
+    "push_splits_to_hf_hub",
     "resolve_vision_modules_to_save",
     "score_group_completions",
     "score_pair",
     "score_transcription",
+    "should_use_4bit",
     "validate_competition_candidate",
+    "validate_records_for_public_publish",
     "verify_source_license",
     "write_competition_colab_notebook",
 ]

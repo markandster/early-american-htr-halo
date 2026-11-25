@@ -11,6 +11,7 @@ from eahtr.colab_pipeline import (
     assign_deterministic_split,
     make_sham_derangement,
     resolve_vision_modules_to_save,
+    should_use_4bit,
     validate_competition_candidate,
     write_competition_colab_notebook,
 )
@@ -84,12 +85,38 @@ def test_assign_deterministic_split_groups_consistently() -> None:
     assert splits == {"train", "val", "test_public"}
 
 
+def test_should_use_4bit_across_gpus_and_arms() -> None:
+    g12 = COMPETITION_CANDIDATES["gemma4_12b"]
+    g26 = COMPETITION_CANDIDATES["gemma4_26b_a4b"]
+    ink = COMPETITION_CANDIDATES["inkling2_mini"]
+    q35 = COMPETITION_CANDIDATES["qwen36_35b_a3b"]
+
+    # L4 24 GB requires 4-bit for both zero-shot and training across all candidates
+    for spec in (g12, g26, ink, q35):
+        assert should_use_4bit(spec, 24.0, "baseline_zeroshot") is True
+        assert should_use_4bit(spec, 24.0, "real") is True
+
+    # A100 40 GB runs 12B zero-shot in BF16, but 26B/35B zero-shot and all training in 4-bit
+    assert should_use_4bit(g12, 40.0, "baseline_zeroshot") is False
+    assert should_use_4bit(g12, 40.0, "real") is True
+    for spec in (g26, ink, q35):
+        assert should_use_4bit(spec, 40.0, "baseline_zeroshot") is True
+        assert should_use_4bit(spec, 40.0, "real") is True
+
+    # H100 / A100 80 GB runs 12B, 26B, and 35B in BF16 cleanly
+    for spec in (g12, g26, ink, q35):
+        assert should_use_4bit(spec, 80.0, "baseline_zeroshot") is False
+        assert should_use_4bit(spec, 80.0, "real") is False
+
+
 def test_generated_notebook_valid_json_ast_and_public_only(tmp_path: Path) -> None:
     nb_path = write_competition_colab_notebook(tmp_path / "test_colab.ipynb")
     raw_text = nb_path.read_text(encoding="utf-8")
     assert "SMOKE_TEST_MODE" in raw_text
     assert "AutoModelForMultimodalLM" in raw_text
     assert "userdata" in raw_text
+    assert "should_use_4bit" in raw_text
+    assert "PUBLISH_TO_HF_DATASET" in raw_text
 
     nb = json.loads(raw_text)
     assert nb["nbformat"] == 4

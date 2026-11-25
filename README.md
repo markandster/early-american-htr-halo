@@ -24,7 +24,7 @@ This project pairs **full-resolution SFT** (unfrozen vision projector / encoder-
 
 - **In Scope — Diplomatic Transcription with Exact Line Breaks:** Models are post-trained strictly for writer-general diplomatic transcription preserving period spelling, capitalization, punctuation, abbreviations, and **exact physical line breaks (`\n`)**, which directly supports downstream line-to-transcript alignment at zero extra token cost.
 - **Out of Scope — Word-Level Bounding-Box Generation:** Autoregressive per-word JSON or coordinate emission increases sequence length ~3–5× per page, worsening token-cap non-termination and repetition loops while slowing GRPO rollouts. Word localization is better handled downstream by dedicated line segmentation plus CTC forced alignment. (Separate-prompt *line-level* bounding-box experiments over ALTO-XML `<TextLine>` polygons are deferred until transcription converges.)
-- **Out of Scope — Writer Identification / Authorship Attribution:** HTR optimizes *writer-invariant* representations (mapping varied hands to the same text), whereas writer identification requires *content-invariant, writer-specific* stroke geometry and calibrated open-set likelihood scoring. Training an autoregressive VLM on writer labels risks lexical/place-name shortcuts and conflates archival correspondent metadata with verified penmanship (many 18th-century official letters were written by clerks or aides).
+- **Out of Scope — Writer Identification / Authorship Attribution:** HTR optimizes *writer-invariant* text recognition (mapping varied hands to accurate text), whereas writer identification is a distinct task with different objectives and annotation requirements and is out of scope for this repository.
 
 ---
 
@@ -60,6 +60,8 @@ All splits are gated by `eahtr.hygiene.audit_split_disjointness` for zero collis
 | **2** | **Inkling 2 Mini** | 26.4B looped MoE VLM (`~5.4B` eff. active) | Verify 4-bit MLX `<= 24 GiB` | Apache-2.0 |
 | **3** | **Qwen3.6-35B-A3B** | 35B total / 3B active MoE VLM | 4-bit MLX (`~20.4 GiB`) | Apache-2.0 |
 
+See [docs/TRAINING_PLAN.md](docs/TRAINING_PLAN.md) for the full competition training plan, corpus hygiene rules, Gemma 4 (`1120` vision token budget) and Inkling 2 Mini execution sequence, and Stage 1 SFT → Stage 2 GRPO schedule.
+
 ---
 
 ## Repository Layout
@@ -67,6 +69,7 @@ All splits are gated by `eahtr.hygiene.audit_split_disjointness` for zero collis
 ```text
 ├── .github/workflows/ci.yml # Automated pytest, YAML, and notebook AST checks
 ├── configs/halo/            # Halo SFT & Online/Offline GRPO YAML templates
+├── docs/TRAINING_PLAN.md    # Competition training plan (Gemma 4 -> Inkling 2 Mini)
 ├── notebooks/               # Self-contained Colab Pro public-corpus SFT & rollout notebook
 ├── results/                 # Public benchmark & ablation ledger (held-out public splits)
 ├── src/eahtr/

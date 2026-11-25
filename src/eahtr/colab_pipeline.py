@@ -134,6 +134,17 @@ def validate_competition_candidate(spec: CompetitionCandidateSpec) -> None:
         raise ValueError(f"Vision projector/embedder patterns must be non-empty for {spec.hf_repo}")
 
 
+def should_use_4bit(spec: CompetitionCandidateSpec, vram_gb: float, arm: str) -> bool:
+    """Decide whether to load a model in 4-bit NF4 based on GPU VRAM and arm.
+
+    Zero-shot inference needs roughly ``params_b * 2.5`` GB in BF16 (weights + KV/vision buffers),
+    whereas LoRA fine-tuning requires ``spec.min_bf16_vram_gb`` to stay in full BF16 cleanly.
+    """
+    if arm == "baseline_zeroshot":
+        return vram_gb < min(spec.min_bf16_vram_gb, spec.params_b * 2.5)
+    return vram_gb < spec.min_bf16_vram_gb
+
+
 def resolve_vision_modules_to_save(
     module_names: Iterable[str],
     patterns: Sequence[str],
@@ -311,9 +322,11 @@ from eahtr.colab_pipeline import (
     assign_deterministic_split,
     make_sham_derangement,
     resolve_vision_modules_to_save,
+    should_use_4bit,
     validate_competition_candidate,
 )
 from eahtr.corpus import filter_corpus_record, parse_alto_xml_lines
+from eahtr.hf_dataset import push_splits_to_hf_hub
 from eahtr.hygiene import audit_split_disjointness, clean_diplomatic_target
 from eahtr.metrics import normalize_strict, score_pair
 from eahtr.rewards import score_group_completions, score_transcription
@@ -384,6 +397,10 @@ MAX_SEQ_LEN = 2048
 MAX_EVAL_NEW_TOKENS = 1536
 VAL_EVAL_MAX_PAGES = 24 if SMOKE_TEST_MODE else 48
 TEST_EVAL_MAX_PAGES = 32 if SMOKE_TEST_MODE else 64  # Set None for entire held-out public test split
+
+# Optional Hugging Face Hub Dataset export (strictly public/CC-BY-4.0 splits only)
+PUBLISH_TO_HF_DATASET = False
+HF_DATASET_REPO_ID = 'markandster/early-american-htr-public'
 
 # Offline GRPO rollout generation (Cell 7)
 GENERATE_OFFLINE_GRPO_ROLLOUTS = False
@@ -618,6 +635,12 @@ audit_summary = {
 (OUTPUT_ROOT / 'corpus_audit_report.json').write_text(json.dumps(audit_summary, indent=2), encoding='utf-8')
 print(json.dumps({k: v for k, v in audit_summary.items() if 'audit' not in k}, indent=2))
 print('Disjointness checks PASSED: train vs val and train vs test_public.')
+
+if PUBLISH_TO_HF_DATASET:
+    print(f'Publishing validated public splits to Hugging Face Hub: {HF_DATASET_REPO_ID} ...')
+    !pip install -q datasets huggingface_hub
+    ds_url = push_splits_to_hf_hub(all_records_by_split, HF_DATASET_REPO_ID, audit_summary, private=False)
+    print(f'Published public dataset: {ds_url}')
 """
 
     cell_5_train_helpers = """
@@ -764,14 +787,15 @@ def run_candidate_arm(cand_key: str, arm: str, arm_train_rows: list[dict], val_s
     }
     processor = load_processor_fullres(spec_dict)
 
-    use_4bit = (VRAM_GB < spec.min_bf16_vram_gb) and (arm != 'baseline_zeroshot')
+    use_4bit = should_use_4bit(spec, VRAM_GB, arm)
     load_kwargs = {
         'device_map': 'auto',
         'torch_dtype': torch.bfloat16,
         'trust_remote_code': spec.trust_remote_code,
     }
     if use_4bit:
-        print(f'VRAM {VRAM_GB} GB < {spec.min_bf16_vram_gb} GB: using 4-bit NF4 QLoRA (BF16 compute)')
+        mode_label = '4-bit NF4 inference' if arm == 'baseline_zeroshot' else '4-bit NF4 QLoRA'
+        print(f'VRAM {VRAM_GB} GB: loading {cand_key} ({arm}) with {mode_label} (BF16 compute)')
         load_kwargs['quantization_config'] = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_quant_type='nf4',
@@ -787,6 +811,7 @@ def run_candidate_arm(cand_key: str, arm: str, arm_train_rows: list[dict], val_s
             'candidate': cand_key,
             'hf_repo': spec.hf_repo,
             'arm': arm,
+            'used_4bit': use_4bit,
             'scores': eval_res['scores'],
         }
         (out_dir / 'predictions_public_test.json').write_text(
