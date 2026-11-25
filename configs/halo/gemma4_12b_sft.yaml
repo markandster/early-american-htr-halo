@@ -1,0 +1,36 @@
+# Template aligned with Halo docs; verify exact keys against Dec 1 Track Rules and Halo release commit.
+model_name_or_path: google/gemma-4-12b-it
+license: Apache-2.0
+task_type: vlm_sft
+
+# Dataset (CC-BY-4.0 / Public Domain only)
+dataset_path: data/public_train.jsonl
+val_dataset_path: data/public_val.jsonl
+max_pixels: 4194304 # 2048 x 2048 full-resolution manuscript preservation
+assistant_only_loss: true
+
+# Trainable parameters: full patch/backbone adaptation + attention/MLP LoRA
+use_peft: true
+lora_r: 16
+lora_alpha: 32
+lora_dropout: 0.05
+lora_target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - gate_proj
+  - up_proj
+  - down_proj
+
+# Optimization
+num_train_epochs: 1.5
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 8
+learning_rate: 2.0e-5
+bf16: true
+gradient_checkpointing: true
+logging_steps: 10
+eval_steps: 100
+save_steps: 100
+output_dir: runs/gemma4_12b_sft

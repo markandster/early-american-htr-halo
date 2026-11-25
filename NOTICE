@@ -1,0 +1,12 @@
+early-american-htr-halo
+Copyright 2026 Mark Sternberg
+
+This product includes software developed by Mark Sternberg and released
+under the Apache License, Version 2.0.
+
+External Dataset & Model Provenance (not bundled in this repository):
+- Revolutionary City HTR Corpus (Zenodo record 15776323): CC-BY-4.0
+- Library of Congress "By the People" transcriptions & master images: Public Domain
+- Supported base VLMs (Gemma 4, Inkling 2 Mini, Qwen3.6): Apache-2.0
+- Training framework target: Halo (https://github.com/whitecircle/halo),
+  subject to the Halo License for framework code and derivatives.

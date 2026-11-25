@@ -1,0 +1,20 @@
+# Template aligned with Halo grpo/offline; verify exact keys against Dec 1 Track Rules and Halo release commit.
+model_name_or_path: runs/gemma4_12b_sft/merged
+dataset: data/scored_offline_grpo_rollouts.jsonl
+prompt_field: prompt
+completion_field: completion
+reward_field: reward
+
+learning_rate: 5.0e-6
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 8
+num_generations: 8
+max_prompt_length: 4096
+max_completion_length: 2048
+beta: 0.03
+scale_rewards: group
+bf16: true
+
+output_dir: runs/archival_grpo_offline
+save_strategy: steps
+save_steps: 50

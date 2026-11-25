@@ -1,0 +1,32 @@
+# Template aligned with Halo grpo/online; verify exact keys against Dec 1 Track Rules and Halo release commit.
+model_name_or_path: runs/gemma4_12b_sft/merged
+dataset: data/public_grpo_prompts.jsonl
+prompt_field: prompt
+answer_field: reference
+
+learning_rate: 5.0e-6
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 8
+num_generations: 8
+max_prompt_length: 4096
+max_completion_length: 2048
+beta: 0.03
+scale_rewards: group
+bf16: true
+
+# Deterministic archival verifier weights (matched to eahtr.rewards.ArchivalRewardConfig)
+rewards:
+  - source: eahtr.rewards
+    name: archival_diplomatic_verifier
+    weight: 1.0
+    params:
+      cer_weight: 0.6
+      wer_weight: 0.4
+      modernization_penalty: 0.05
+      format_penalty: 0.10
+      truncation_penalty: 0.25
+      loop_floor: -1.0
+
+output_dir: runs/archival_grpo_online
+save_strategy: steps
+save_steps: 50

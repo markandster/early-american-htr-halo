@@ -1,0 +1,85 @@
+# Early American HTR — Halo Post-Training (`early-american-htr-halo`)
+
+Standalone **Apache-2.0** post-training toolkit, corpus hygiene pipeline, and verifiable GRPO (RLVR) reward framework for **writer-general 18th-century American diplomatic handwriting recognition** (c. 1750–1800 English round hand), designed for [White Circle Halo](https://github.com/whitecircle/halo) and local Apple Silicon (M3 Max 36 GB, MLX) inference.
+
+---
+
+## Problem & Motivation
+
+Off-the-shelf document OCR models trained on modern printed text perform poorly on unsegmented 18th-century cursive manuscripts, while plain cross-entropy Supervised Fine-Tuning (SFT) on vision-language models exhibits four failure modes on unseen writers:
+
+1. **Absorbing Repetition Loops:** Line-wrap hyphens (`con-\n`) and tabular leader dots can trap autoregressive decoders in hundreds of consecutive `-` lines or token-cap non-termination.
+2. **Modernization Drift:** Language priors silently "autocorrect" period orthography (`chear` → `cheer`, `usefull` → `useful`, `publick` → `public`).
+3. **Editorial Bracket Leakage:** Unstripped `[...]` editorial insertions and placeholder tokens bleed from archival XML conventions into clean manuscript transcriptions.
+4. **Premature Truncation & Blank-Page Hallucinations:** Stopping mid-letter or emitting archive boilerplate on blank versos.
+
+This project pairs **full-resolution SFT** (unfrozen vision projector / encoder-free patch path + LoRA/FSDP2) with **critic-free GRPO (RLVR)** scored by a deterministic archival verifier that directly penalizes all four failure modes.
+
+---
+
+## Verifiable Archival Reward Function
+
+For a completion $y$ and diplomatic ground truth $y^*$:
+
+$$R(y, y^*) = w_c \max\left(0,\, 1 - \text{CER}_{\text{strict}}(y, y^*)\right) + w_w \max\left(0,\, 1 - \text{WER}_{\text{strict}}(y, y^*)\right) - \lambda_{\text{mod}} P_{\text{mod}}(y, y^*) - \lambda_{\text{fmt}} P_{\text{fmt}}(y) - \lambda_{\text{trunc}} P_{\text{trunc}}(y, y^*)$$
+
+- **Hard Failure Floor (`-1.0`):** Applied unconditionally on `finish_reason == "length"`, consecutive repeated lines (`>= 4`), repeated standalone dash tokens (`>= 4`), repeated 4-gram loops, or non-empty output on blank versos.
+- **Strict Diplomatic Scoring (`eahtr.metrics`):** Preserves case, punctuation, original spelling, and line breaks (`Unicode NFC`, collapsed whitespace) alongside lenient scoring (lowercased, punctuation-stripped).
+- **Archival Spelling & Leakage Penalties:** Penalizes attested 18th-century spelling modernizations and unprompted `[...]` / Markdown / watermark boilerplate beyond what appears in $y^*$.
+
+---
+
+## Rights-Cleared Corpus Policy
+
+All competition and public training recipes enforce a strict license allowlist (`CC-BY-4.0`, `CC0-1.0`, `Public Domain`) via `eahtr.corpus.verify_source_license`:
+
+- **Revolutionary City HTR Corpus** (Zenodo `15776323`, `CC-BY-4.0`) — ALTO-XML parsed by `eahtr.corpus.parse_alto_xml_lines`.
+- **Library of Congress *By the People*** (`Public Domain`) — volunteer as-written manuscript transcriptions paired with public-domain master scans.
+
+All splits are gated by `eahtr.hygiene.audit_split_disjointness` for zero collisions across `document_id`, `writer_key`, `image_sha256`, and 32-word SHA-256 n-grams.
+
+---
+
+## Target Apache-2.0 Base Models
+
+| Priority | Model | Architecture | Local Target (M3 Max 36 GB MLX) | License |
+|---|---|---|---|---|
+| **1A** | **Gemma 4 12B** | 12B dense encoder-free unified VLM | 8-bit / 4-bit MLX (`<= 12 GiB`) | Apache-2.0 |
+| **1B** | **Gemma 4 26B-A4B** | 26B total / 4B active MoE VLM | 4-bit MLX (`~14.3 GiB`) | Apache-2.0 |
+| **2** | **Inkling 2 Mini** | 26.4B looped MoE VLM (`~5.4B` eff. active) | Verify 4-bit MLX `<= 24 GiB` | Apache-2.0 |
+| **3** | **Qwen3.6-35B-A3B** | 35B total / 3B active MoE VLM | 4-bit MLX (`~20.4 GiB`) | Apache-2.0 |
+
+---
+
+## Repository Layout
+
+```text
+├── configs/halo/            # Halo SFT & Online/Offline GRPO YAML templates
+├── src/eahtr/
+│   ├── metrics.py           # Strict & lenient diplomatic WER/CER via rapidfuzz
+│   ├── rewards.py           # Deterministic GRPO archival reward & JSONL CLI scorer
+│   ├── hygiene.py           # Target normalization, slip/leader-dot filters, split audit
+│   └── corpus.py            # License allowlist gate & ALTO-XML line extractor
+└── tests/                   # Pytest unit suite covering metrics, rewards, hygiene, corpus
+```
+
+---
+
+## Quickstart
+
+```bash
+pip install -e ".[dev]"
+pytest
+```
+
+Score a JSONL batch of candidate completions for Halo Offline GRPO:
+
+```bash
+python -m eahtr.rewards --input rollouts.jsonl --output scored_rollouts.jsonl
+```
+
+---
+
+## License
+
+Code, configs, and reward scripts in this repository are licensed under the [Apache License, Version 2.0](LICENSE). External datasets and base model weights remain under their respective permissive licenses (see [NOTICE](NOTICE)).
