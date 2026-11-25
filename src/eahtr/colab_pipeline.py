@@ -382,7 +382,7 @@ TEST_FRACTION = 0.075
 INCLUDE_LOC_BY_THE_PEOPLE = False
 LOC_MAX_PAGES = 150  # Polite cap when enabled
 
-# Training hyperparameters (mirrors proven Phase 4B full-res setup)
+# Training hyperparameters (full-resolution trainable-vision SFT setup)
 SEED = 20261125
 EPOCHS = 1 if SMOKE_TEST_MODE else 2
 LORA_RANK = 16
