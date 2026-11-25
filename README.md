@@ -17,6 +17,14 @@ This project pairs **full-resolution SFT** (unfrozen vision projector / encoder-
 
 ---
 
+## Scope & Architectural Boundaries (Non-Goals)
+
+- **In Scope — Diplomatic Transcription with Exact Line Breaks:** Models are post-trained strictly for writer-general diplomatic transcription preserving period spelling, capitalization, punctuation, abbreviations, and **exact physical line breaks (`\n`)**, which directly supports downstream line-to-transcript alignment at zero extra token cost.
+- **Out of Scope — Word-Level Bounding-Box Generation:** Autoregressive per-word JSON or coordinate emission increases sequence length ~3–5× per page, worsening token-cap non-termination and repetition loops while slowing GRPO rollouts. Word localization is better handled downstream by dedicated line segmentation plus CTC forced alignment. (Separate-prompt *line-level* bounding-box experiments over ALTO-XML `<TextLine>` polygons are deferred until transcription converges.)
+- **Out of Scope — Writer Identification / Authorship Attribution:** HTR optimizes *writer-invariant* representations (mapping varied hands to the same text), whereas writer identification requires *content-invariant, writer-specific* stroke geometry and calibrated open-set likelihood scoring. Training an autoregressive VLM on writer labels risks lexical/place-name shortcuts and conflates archival correspondent metadata with verified penmanship (many 18th-century official letters were written by clerks or aides).
+
+---
+
 ## Verifiable Archival Reward Function
 
 For a completion $y$ and diplomatic ground truth $y^*$:
