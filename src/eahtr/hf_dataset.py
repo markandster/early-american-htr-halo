@@ -15,14 +15,9 @@ from itertools import combinations
 import json
 from typing import Any
 
+from .candidates import DIPLOMATIC_PROMPT as DEFAULT_TRANSCRIPTION_PROMPT
 from .corpus import verify_source_license
 from .hygiene import audit_split_disjointness
-
-DEFAULT_TRANSCRIPTION_PROMPT = (
-    "Transcribe every word on this manuscript page using only the visible ink. "
-    "Preserve the writer's original spelling, capitalization, punctuation, "
-    "abbreviations, and line breaks. Do not modernize spelling or add commentary."
-)
 
 
 def validate_records_for_public_publish(
@@ -117,9 +112,11 @@ excluded by construction via `eahtr.corpus.verify_source_license`.
 
 ## Split Hygiene
 
-Splits are deterministic at document-group granularity (`assign_deterministic_split`) and
-verified via `audit_split_disjointness` for zero document ID, writer key, image SHA-256,
-and 32-gram word overlap between `train` and every held-out evaluation split.
+Splits are grouped by adjacent/collection item runs (`assign_revcity_item_groups(max_id_gap=30)` +
+`REVCITY_COLLECTION_OVERRIDES`) and balanced across institutions (`assign_balanced_group_splits`), then
+verified all-pairwise via `audit_split_disjointness` for zero document ID, writer key, image SHA-256,
+`>= 8`-word exact-text, and 32-gram word overlap across `train`, `val`, and `test_public`
+(document-group disjoint by default unless `PORTAL_CREATOR_MAP_PATH` creator metadata is supplied).
 
 ```json
 {summary_json}

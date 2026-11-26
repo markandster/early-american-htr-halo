@@ -407,9 +407,9 @@ def write_halo_smoke_notebook(out_path: Path) -> Path:
             "source": [
                 "# Halo 1x GPU VLM Smoke Harness (SFT + SMPO)\n",
                 "\n",
-                "Runs an external `whitecircle/halo` Python 3.12 smoke check (5 steps of `sft.py` ",
-                "and 5 steps of `smpo.py`) on 16 rights-cleared RevCity (`CC-BY-4.0`) manuscript pages, ",
-                "verifying `1120` realized image tokens on the staged Gemma 4 processor and finite 5-step training loss.",
+                "Runs an external `whitecircle/halo` Python 3.12 smoke check on 16 RevCity (`CC-BY-4.0`) pages: ",
+                "5 steps of `sft.py` at `1120` realized image tokens, PEFT merge + `verify_mlx_export`, ",
+                "shortest-page natural `<turn|>` stop, fresh-process Stage 1→2 `SMPOTrainer` continuity, and 5 steps of `smpo.py`.",
             ],
         },
         {

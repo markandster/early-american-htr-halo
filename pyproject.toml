@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "early-american-htr-halo"
 version = "0.1.0"
-description = "Verifiable GRPO rewards, target hygiene, and Halo post-training recipes for 18th-century diplomatic handwriting VLMs"
+description = "Verifiable archival rewards, corpus hygiene, and Halo SFT/VLM SMPO post-training recipes for 18th-century diplomatic handwriting VLMs"
 readme = "README.md"
 requires-python = ">=3.12"
 license = {text = "Apache-2.0"}

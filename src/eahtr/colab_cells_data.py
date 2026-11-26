@@ -19,14 +19,14 @@ CELL_1_MD_SOURCE = """
 This notebook mirrors our high-resolution, trainable-vision, sham-controlled training harness while strictly restricting datasets and models to competition-eligible open resources:
 
 1. **Data (100% Public & Rights-Cleared):**
-   - **Revolutionary City HTR Corpus** (Zenodo `15776323`, **CC-BY-4.0**) downloaded directly to Colab SSD (pairing `.jpg`/`.jpeg` and `.png` pages with ALTO-XML), parsed geometrically via `eahtr.corpus.parse_alto_xml_lines`, cleaned via `eahtr.hygiene.clean_diplomatic_target`, grouped across adjacent item/recto-verso IDs via `assign_revcity_item_groups`, and split **before** smoke subsampling with zero document, writer, image SHA-256, perceptual dHash, or 32-word n-gram leakage.
+   - **Revolutionary City HTR Corpus** (Zenodo `15776323`, **CC-BY-4.0**) downloaded directly to Colab SSD (pairing `.jpg`/`.jpeg` and `.png` pages with ALTO-XML), parsed in annotated ALTO reading order via `eahtr.corpus.parse_alto_xml_lines(..., sort_regions=False)`, cleaned via `eahtr.hygiene.clean_diplomatic_target`, grouped via `assign_revcity_item_groups(max_id_gap=30)` + `REVCITY_COLLECTION_OVERRIDES`, and split **before** smoke subsampling with hard-gated zero document-group, writer, image SHA-256, `>= 8`-word exact-text, or 32-word n-gram leakage (plus advisory perceptual dHash review).
    - **Optional Library of Congress *By the People*** (`LCCN 2020446971`, **Public Domain**) behind `INCLUDE_LOC_BY_THE_PEOPLE = False` as a genre-shift challenge panel (`hard_case_panel.jsonl` also captures blanks/leader-dots/duplicates).
 2. **Candidate Apache-2.0 Models:**
-   - `gemma4_12b` (`google/gemma-4-12B-it`, **primary submission candidate**, ungated) — encoder-free dense VLM (`Stage 1 SFT` → conditional `Stage 2 VLM SMPO` with `chosen_sft_ratio: 1.0`).
+   - `gemma4_12b` (`google/gemma-4-12B-it`, **primary submission candidate**, ungated) — 12B dense unified VLM (`gemma4_unified`, `1120` soft tokens; `Stage 1 SFT` → conditional `Stage 2 VLM SMPO` with `chosen_sft_ratio: 1.0`).
    - Halo cluster track also tests conditional `thinkingmachines/Inkling-2-Small` (`EP=8`, frozen-vision image-conditioned pilot) after Dec 1.
 3. **Dev Discipline, Evaluation & Stage 2 Rollouts:**
    - Development runs score **validation (`val`) ONLY** (with hash-keyed caches, same-checkpoint image-swap checks, strict/lenient + newline/line-boundary + order-tolerant CER, dual-convention zero-shot scoring, and verifiable `eahtr.rewards`). `test_public` remains frozen until final checkpoint freeze.
-   - Optional Cell 7 generates and scores $K=4$ multi-temperature rollouts from the merged SFT model for Halo Stage 2 **VLM SMPO** (`chosen_sft_ratio: 1.0`).
+   - Optional Cell 7 generates and scores $K=4$ multi-temperature rollouts from the merged SFT model on strictly held-out `oof_train` folds for Halo Stage 2 **VLM SMPO** (`chosen_sft_ratio: 1.0`).
 
 > **Halo Competition Rule Note (Terms §§ 4.2 & 5):** Pre-Dec-1 Colab runs establish baseline benchmarks, data hygiene, vision-gradient flow, and VLM preference rollouts on the competition corpus. Final competition submissions after Dec 1 must be reproduced by the official **Halo** training recipe (`github.com/whitecircle/halo`) under published Track Rules.
 """
@@ -114,7 +114,7 @@ from eahtr.hygiene import audit_split_disjointness, clean_diplomatic_target, com
 from eahtr.metrics import normalize_preserve_newlines, normalize_strict, paired_bootstrap_ci, score_line_breaks, score_pair
 from eahtr.rewards import build_preference_pairs, recommended_max_new_tokens, score_group_completions, score_transcription
 
-assert torch.cuda.is_available(), 'CUDA GPU required (select L4 24GB, A100 40GB, or A100 80GB in Colab Pro)'
+assert torch.cuda.is_available(), 'CUDA GPU required (select L4 24GB, A100 40GB/80GB, or H100 80GB in Colab Pro)'
 GPU_NAME = torch.cuda.get_device_name(0)
 VRAM_GB = round(torch.cuda.get_device_properties(0).total_memory / 1e9, 2)
 print(f'GPU: {GPU_NAME} | VRAM: {VRAM_GB} GB | PyTorch: {torch.__version__}')
@@ -150,7 +150,7 @@ OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
 WORK_ROOT.mkdir(parents=True, exist_ok=True)
 
 # Set SMOKE_TEST_MODE = True for a ~15-25 min end-to-end validation run first;
-# switch to False for the full ~3,200-page public dataset run.
+# switch to False for the full 3,145-page active public dataset run (2,897 train / 126 val / 122 test_public).
 SMOKE_TEST_MODE = True
 
 # Select which Apache-2.0 competition candidates to run:
@@ -195,7 +195,7 @@ FINAL_FREEZE_EVAL_TEST_PUBLIC = False  # Keep False during dev; test_public is f
 PUBLISH_TO_HF_DATASET = False
 HF_DATASET_REPO_ID = 'markandster/early-american-htr-public'
 
-# Offline GRPO rollout generation (Cell 7)
+# Stage 2 VLM SMPO / Offline GRPO rollout generation (Cell 7)
 GENERATE_OFFLINE_GRPO_ROLLOUTS = False
 ROLLOUT_SOURCE = 'oof_train'
 ALLOW_IN_SAMPLE_TRAIN_ROLLOUTS = False
