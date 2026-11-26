@@ -205,18 +205,17 @@ def run_candidate_arm(cand_key: str, arm: str, arm_train_rows: list[dict], val_s
     if use_4bit and spec.quant_method == 'modelopt':
         raise RuntimeError(f'Candidate {spec.hf_repo} uses {spec.quant_method} quantization; cannot use 4-bit NF4 QLoRA.')
 
-    load_kwargs = {'device_map': 'auto', 'torch_dtype': torch.bfloat16, 'trust_remote_code': spec.trust_remote_code}
+    load_kwargs = {'device_map': {'': 0} if use_4bit else 'auto', 'torch_dtype': torch.bfloat16, 'trust_remote_code': spec.trust_remote_code}
     if spec.hf_revision:
         load_kwargs['revision'] = spec.hf_revision
     if 'gemma-4' in spec.hf_repo.lower():
         load_kwargs['attn_implementation'] = 'sdpa'
     if use_4bit:
-        print(f'VRAM {VRAM_GB} GB: loading {cand_key} ({arm}) in 4-bit NF4 (BF16 compute + BF16 vision skip)')
-        load_kwargs['quantization_config'] = BitsAndBytesConfig(
-            load_in_4bit=True, bnb_4bit_quant_type='nf4', bnb_4bit_use_double_quant=True,
-            bnb_4bit_compute_dtype=torch.bfloat16, bnb_4bit_quant_storage=torch.bfloat16,
-            llm_int8_skip_modules=list(spec.vision_trainable_patterns),
-        )
+        print(f'VRAM {VRAM_GB} GB: loading {cand_key} ({arm}) in 4-bit NF4 (BF16 compute/storage)')
+        bnb_kw = dict(load_in_4bit=True, bnb_4bit_quant_type='nf4', bnb_4bit_use_double_quant=True, bnb_4bit_compute_dtype=torch.bfloat16, bnb_4bit_quant_storage=torch.bfloat16)
+        if 'gemma-4' not in spec.hf_repo.lower():
+            bnb_kw['llm_int8_skip_modules'] = list(spec.vision_trainable_patterns)
+        load_kwargs['quantization_config'] = BitsAndBytesConfig(**bnb_kw)
 
     model = load_vlm_model(spec.hf_repo, load_kwargs)
 
