@@ -30,6 +30,21 @@ def test_halo_export_helpers_and_dir_verifier(tmp_path: Path, monkeypatch: pytes
         def from_dict(cls, data: dict, features: object) -> "FakeDataset":
             return cls(data, features)
 
+        @classmethod
+        def from_generator(
+            cls,
+            generator: object,
+            features: object = None,
+            cache_dir: object = None,
+            gen_kwargs: dict | None = None,
+        ) -> "FakeDataset":
+            rows = list(generator(**(gen_kwargs or {})))  # type: ignore[operator]
+            cols: dict[str, list] = {}
+            for row in rows:
+                for k, v in row.items():
+                    cols.setdefault(k, []).append(v)
+            return cls(cols, features)
+
     class FakeDatasetDict(dict):
         def save_to_disk(self, path: str) -> None:
             saved_dicts.append((path, dict(self)))

@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import tempfile
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
+from .halo_export_verify import verify_exported_vlm_dir
 from .halo_smoke import DEFAULT_SMOKE_PROMPT, filter_vlm_rows_post_expansion
 from .hygiene import audit_split_disjointness
+from .vision_budget import compute_target_grid_dimensions, encode_image_for_vlm
 
 
 def _normalize_msg_list(messages: Any) -> list[dict[str, Any]]:
@@ -41,6 +44,104 @@ def _extract_text(messages: Any) -> str:
     return "\n".join(chunks)
 
 
+def _resolve_row_vision_tokens(
+    image_path: str,
+    max_image_tokens: int | None,
+    cell_size: tuple[int, int],
+    fallback_tokens: int,
+) -> int:
+    if max_image_tokens is None:
+        return fallback_tokens
+    from PIL import Image
+
+    im = Image.open(str(image_path))
+    try:
+        w, h = im.size
+    finally:
+        if hasattr(im, "close"):
+            im.close()
+    _, _, tok_count = compute_target_grid_dimensions(
+        w, h, max_image_tokens=max_image_tokens, cell_w=cell_size[0], cell_h=cell_size[1]
+    )
+    return tok_count
+
+
+def _encode_image_entry(
+    image_path: str,
+    *,
+    max_image_tokens: int | None,
+    cell_size: tuple[int, int],
+    image_format: str,
+) -> Any:
+    if max_image_tokens is None:
+        return str(image_path)
+    from PIL import Image
+
+    im = Image.open(str(image_path))
+    try:
+        payload, _, _, _ = encode_image_for_vlm(
+            im,
+            max_image_tokens=max_image_tokens,
+            cell_w=cell_size[0],
+            cell_h=cell_size[1],
+            image_format=image_format,
+        )
+    finally:
+        if hasattr(im, "close"):
+            im.close()
+    return {"bytes": payload, "path": str(image_path)}
+
+
+def _iter_sft_examples(
+    rows: list[dict[str, Any]],
+    max_image_tokens: int | None,
+    cell_size: tuple[int, int],
+    image_format: str,
+) -> Any:
+    for r in rows:
+        yield {
+            "messages": [
+                {"role": "user", "content": [{"type": "image", "text": None}, {"type": "text", "text": r["prompt"]}]},
+                {"role": "assistant", "content": [{"type": "text", "text": r["text"]}]},
+            ],
+            "images": [
+                _encode_image_entry(
+                    str(r["image_path"]),
+                    max_image_tokens=max_image_tokens,
+                    cell_size=cell_size,
+                    image_format=image_format,
+                )
+            ],
+        }
+
+
+def _iter_pref_examples(
+    rows: list[dict[str, Any]],
+    include_margin: bool,
+    max_image_tokens: int | None,
+    cell_size: tuple[int, int],
+    image_format: str,
+) -> Any:
+    for r in rows:
+        item: dict[str, Any] = {
+            "prompt": r["prompt"],
+            "chosen": r["chosen"],
+            "rejected": r["rejected"],
+            "images": [
+                _encode_image_entry(
+                    str(p),
+                    max_image_tokens=max_image_tokens,
+                    cell_size=cell_size,
+                    image_format=image_format,
+                )
+                for p in r["images"]
+            ],
+        }
+        if include_margin:
+            item["margin"] = r["margin"]
+        yield item
+
+
 def export_halo_vlm_sft_dataset(
     train_records: Sequence[dict[str, Any]],
     test_records: Sequence[dict[str, Any]],
@@ -50,20 +151,39 @@ def export_halo_vlm_sft_dataset(
     max_length: int = 4096,
     vision_tokens: int = 1120,
     prompt_text: str = DEFAULT_SMOKE_PROMPT,
+    max_image_tokens: int | None = None,
+    cell_size: tuple[int, int] = (40, 40),
+    image_format: str = "PNG",
 ) -> dict[str, Any]:
-    """Audit disjointness, filter post-expansion lengths, and export Halo SFT Arrow DatasetDict."""
+    """Audit disjointness, filter post-expansion lengths, and stream-export Halo SFT Arrow DatasetDict."""
     from datasets import Dataset, DatasetDict, Features, Image as HFImage, Sequence as HFSeq, Value
 
     audit = audit_split_disjointness(list(train_records), list(test_records))
     if not audit["passed"]:
         raise ValueError(f"Split disjointness check failed before Halo SFT export: {audit}")
 
-    kept_train, drop_train = filter_vlm_rows_post_expansion(
-        train_records, count_tokens_fn, max_length=max_length, vision_tokens=vision_tokens, prompt_text=prompt_text
-    )
-    kept_test, drop_test = filter_vlm_rows_post_expansion(
-        test_records, count_tokens_fn, max_length=max_length, vision_tokens=vision_tokens, prompt_text=prompt_text
-    )
+    def _filter_sft(rows: Sequence[dict[str, Any]]) -> tuple[list[dict[str, Any]], int, int]:
+        if max_image_tokens is None:
+            kept, dropped = filter_vlm_rows_post_expansion(
+                rows, count_tokens_fn, max_length=max_length, vision_tokens=vision_tokens, prompt_text=prompt_text
+            )
+            return kept, dropped, vision_tokens
+        kept: list[dict[str, Any]] = []
+        dropped = 0
+        max_seen = 0
+        for row in rows:
+            prompt = row.get("prompt") or prompt_text
+            row_vis = _resolve_row_vision_tokens(str(row["image_path"]), max_image_tokens, cell_size, vision_tokens)
+            total = row_vis + count_tokens_fn(prompt) + count_tokens_fn(str(row["text"])) + 32
+            if total <= max_length:
+                kept.append({**row, "prompt": prompt})
+                max_seen = max(max_seen, row_vis)
+            else:
+                dropped += 1
+        return kept, dropped, max_seen
+
+    kept_train, drop_train, max_vis_train = _filter_sft(train_records)
+    kept_test, drop_test, max_vis_test = _filter_sft(test_records)
     if not kept_train or not kept_test:
         raise ValueError(
             f"Post-expansion filtering left empty split (train={len(kept_train)}, test={len(kept_test)})"
@@ -72,32 +192,38 @@ def export_halo_vlm_sft_dataset(
     msg_feature = [{"role": Value("string"), "content": [{"type": Value("string"), "text": Value("string")}]}]
     features = Features({"messages": msg_feature, "images": HFSeq(HFImage())})
 
-    def _to_ds(rows: Sequence[dict[str, Any]]) -> Dataset:
-        return Dataset.from_dict(
-            {
-                "messages": [
-                    [
-                        {
-                            "role": "user",
-                            "content": [{"type": "image", "text": None}, {"type": "text", "text": r["prompt"]}],
-                        },
-                        {"role": "assistant", "content": [{"type": "text", "text": r["text"]}]},
-                    ]
-                    for r in rows
-                ],
-                "images": [[str(r["image_path"])] for r in rows],
-            },
-            features=features,
-        )
-
     out_dir.parent.mkdir(parents=True, exist_ok=True)
-    DatasetDict({"train": _to_ds(kept_train), "test": _to_ds(kept_test)}).save_to_disk(str(out_dir))
+    with tempfile.TemporaryDirectory(prefix="eahtr_hf_cache_") as cache_dir:
+        ds_train = Dataset.from_generator(
+            _iter_sft_examples,
+            features=features,
+            cache_dir=cache_dir,
+            gen_kwargs={
+                "rows": kept_train,
+                "max_image_tokens": max_image_tokens,
+                "cell_size": cell_size,
+                "image_format": image_format,
+            },
+        )
+        ds_test = Dataset.from_generator(
+            _iter_sft_examples,
+            features=features,
+            cache_dir=cache_dir,
+            gen_kwargs={
+                "rows": kept_test,
+                "max_image_tokens": max_image_tokens,
+                "cell_size": cell_size,
+                "image_format": image_format,
+            },
+        )
+        DatasetDict({"train": ds_train, "test": ds_test}).save_to_disk(str(out_dir))
     return {
         "out_dir": str(out_dir),
         "train_rows": len(kept_train),
         "test_rows": len(kept_test),
         "dropped_train": drop_train,
         "dropped_test": drop_test,
+        "max_vision_tokens": max(max_vis_train, max_vis_test),
     }
 
 
@@ -110,19 +236,27 @@ def export_halo_vlm_preference_dataset(
     max_length: int = 4096,
     max_prompt_length: int = 1600,
     vision_tokens: int = 1120,
+    max_image_tokens: int | None = None,
+    cell_size: tuple[int, int] = (40, 40),
+    image_format: str = "PNG",
 ) -> dict[str, Any]:
-    """Filter preference pairs post-expansion and export Halo VLM SMPO Arrow DatasetDict."""
+    """Filter preference pairs post-expansion and stream-export Halo VLM SMPO Arrow DatasetDict."""
     from datasets import Dataset, DatasetDict, Features, Image as HFImage, Sequence as HFSeq, Value
 
-    def _filter_pairs(pairs: Sequence[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+    def _filter_pairs(pairs: Sequence[dict[str, Any]]) -> tuple[list[dict[str, Any]], int, int]:
         kept: list[dict[str, Any]] = []
         dropped = 0
+        max_seen = 0
         max_completion = max_length - max_prompt_length
         for row in pairs:
             imgs = row.get("images") or ([row["image_path"]] if row.get("image_path") else [])
             if not imgs:
                 dropped += 1
                 continue
+            row_vis = sum(
+                _resolve_row_vision_tokens(str(p), max_image_tokens, cell_size, vision_tokens)
+                for p in imgs
+            ) if max_image_tokens is not None else vision_tokens * len(imgs)
             prompt_norm = _normalize_msg_list(row.get("prompt"))
             chosen_norm = _normalize_msg_list(row.get("chosen"))
             rejected_norm = _normalize_msg_list(row.get("rejected"))
@@ -131,9 +265,9 @@ def export_halo_vlm_preference_dataset(
             r_toks = count_tokens_fn(_extract_text(rejected_norm))
             longest_comp = max(c_toks, r_toks)
             if (
-                (vision_tokens + p_toks + 16) <= max_prompt_length
+                (row_vis + p_toks + 16) <= max_prompt_length
                 and (longest_comp + 16) <= max_completion
-                and (vision_tokens + p_toks + longest_comp + 32) <= max_length
+                and (row_vis + p_toks + longest_comp + 32) <= max_length
             ):
                 kept.append(
                     {
@@ -144,9 +278,10 @@ def export_halo_vlm_preference_dataset(
                         "margin": float(row["margin"]) if row.get("margin") is not None else None,
                     }
                 )
+                max_seen = max(max_seen, row_vis)
             else:
                 dropped += 1
-        return kept, dropped
+        return kept, dropped, max_seen
 
     def _pair_audit_rows(pairs: Sequence[dict[str, Any]], *, forbid_eval_splits: bool = False) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
@@ -181,8 +316,8 @@ def export_halo_vlm_preference_dataset(
         audit["image_path_collisions"] = path_collisions
         raise ValueError(f"Split disjointness check failed before Halo preference export: {audit}")
 
-    kept_train, drop_train = _filter_pairs(train_pairs)
-    kept_test, drop_test = _filter_pairs(test_pairs)
+    kept_train, drop_train, max_vis_train = _filter_pairs(train_pairs)
+    kept_test, drop_test, max_vis_test = _filter_pairs(test_pairs)
     if not kept_train or not kept_test:
         raise ValueError(
             f"Post-expansion filtering left empty preference split (train={len(kept_train)}, test={len(kept_test)})"
@@ -200,19 +335,33 @@ def export_halo_vlm_preference_dataset(
         feat_dict["margin"] = Value("float32")
     features = Features(feat_dict)
 
-    def _to_ds(rows: Sequence[dict[str, Any]]) -> Dataset:
-        payload: dict[str, Any] = {
-            "prompt": [r["prompt"] for r in rows],
-            "chosen": [r["chosen"] for r in rows],
-            "rejected": [r["rejected"] for r in rows],
-            "images": [r["images"] for r in rows],
-        }
-        if include_margin:
-            payload["margin"] = [r["margin"] for r in rows]
-        return Dataset.from_dict(payload, features=features)
-
     out_dir.parent.mkdir(parents=True, exist_ok=True)
-    DatasetDict({"train": _to_ds(kept_train), "test": _to_ds(kept_test)}).save_to_disk(str(out_dir))
+    with tempfile.TemporaryDirectory(prefix="eahtr_hf_cache_") as cache_dir:
+        ds_train = Dataset.from_generator(
+            _iter_pref_examples,
+            features=features,
+            cache_dir=cache_dir,
+            gen_kwargs={
+                "rows": kept_train,
+                "include_margin": include_margin,
+                "max_image_tokens": max_image_tokens,
+                "cell_size": cell_size,
+                "image_format": image_format,
+            },
+        )
+        ds_test = Dataset.from_generator(
+            _iter_pref_examples,
+            features=features,
+            cache_dir=cache_dir,
+            gen_kwargs={
+                "rows": kept_test,
+                "include_margin": include_margin,
+                "max_image_tokens": max_image_tokens,
+                "cell_size": cell_size,
+                "image_format": image_format,
+            },
+        )
+        DatasetDict({"train": ds_train, "test": ds_test}).save_to_disk(str(out_dir))
     return {
         "out_dir": str(out_dir),
         "train_rows": len(kept_train),
@@ -220,153 +369,12 @@ def export_halo_vlm_preference_dataset(
         "dropped_train": drop_train,
         "dropped_test": drop_test,
         "include_margin": include_margin,
+        "max_vision_tokens": max(max_vis_train, max_vis_test),
     }
 
 
-def verify_exported_vlm_dir(
-    model_dir: Path,
-    *,
-    expected_soft_tokens: int = 1120,
-    check_gemma4_resolution: bool = True,
-    check_nothink_template: bool = True,
-    model_family: str = "gemma4",
-    reference_dir: Path | None = None,
-) -> dict[str, Any]:
-    """Fail closed if merged/MLX directory lost resolution, template rendering, or token parity."""
-    if not model_dir.is_dir():
-        raise FileNotFoundError(f"Exported model directory not found: {model_dir}")
-
-    checked_fields: dict[str, Any] = {"model_dir": str(model_dir), "model_family": model_family}
-    if check_gemma4_resolution and model_family == "gemma4":
-        proc_path = model_dir / "processor_config.json"
-        if not proc_path.is_file():
-            raise FileNotFoundError(f"Missing required {proc_path} in Gemma 4 export directory")
-        data = json.loads(proc_path.read_text(encoding="utf-8"))
-        if data.get("image_seq_length") != expected_soft_tokens:
-            raise ValueError(
-                f"{proc_path}: image_seq_length={data.get('image_seq_length')} != {expected_soft_tokens}"
-            )
-        ip = data.get("image_processor")
-        if not isinstance(ip, dict) or ip.get("max_soft_tokens") != expected_soft_tokens:
-            raise ValueError(
-                f"{proc_path}: image_processor.max_soft_tokens={ip.get('max_soft_tokens') if isinstance(ip, dict) else None} "
-                f"!= {expected_soft_tokens}"
-            )
-        if "image_seq_length" in ip and ip["image_seq_length"] != expected_soft_tokens:
-            raise ValueError(
-                f"{proc_path}: image_processor.image_seq_length={ip['image_seq_length']} != {expected_soft_tokens}"
-            )
-        checked_fields["image_seq_length"] = expected_soft_tokens
-
-    if check_nothink_template:
-        from jinja2 import BaseLoader, Environment
-        from jinja2.ext import Extension
-
-        class _GenTagExt(Extension):
-            tags = {"generation"}
-
-            def parse(self, parser: Any) -> Any:
-                next(parser.stream)
-                return parser.parse_statements(["name:endgeneration"], drop_needle=True)
-
-        tpl_text = ""
-        jinja_path = model_dir / "chat_template.jinja"
-        tok_cfg_path = model_dir / "tokenizer_config.json"
-        if jinja_path.is_file():
-            tpl_text = jinja_path.read_text(encoding="utf-8")
-        elif tok_cfg_path.is_file():
-            tok_data = json.loads(tok_cfg_path.read_text(encoding="utf-8"))
-            raw = tok_data.get("chat_template")
-            tpl_text = raw if isinstance(raw, str) else ""
-        if not tpl_text.strip():
-            raise ValueError(f"{model_dir}: missing chat_template.jinja and tokenizer_config.json chat_template")
-        if "else 0.9" in tpl_text or "Thinking effort level: 0.9" in tpl_text:
-            raise ValueError(f"{model_dir}: detected Inkling 0.9 reasoning-effort default instead of 0.0")
-        env = Environment(loader=BaseLoader(), extensions=[_GenTagExt])
-        env.globals["raise_exception"] = lambda msg: (_ for _ in ()).throw(ValueError(msg))
-        tpl = env.from_string(tpl_text)
-        msg1 = [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": "Transcribe."}]}]
-        msg_full = msg1 + [{"role": "assistant", "content": [{"type": "text", "text": "Dear Sir"}]}]
-        msg2 = msg_full + [{"role": "user", "content": [{"type": "text", "text": "Next page."}]}]
-        r1 = tpl.render(messages=msg1, add_generation_prompt=True, enable_thinking=False, bos_token="", eos_token="", tools=None)
-        r1_default = tpl.render(messages=msg1, add_generation_prompt=True, bos_token="", eos_token="", tools=None)
-        r1_nogen = tpl.render(messages=msg1, add_generation_prompt=False, bos_token="", eos_token="", tools=None)
-        r_full = tpl.render(messages=msg_full, add_generation_prompt=False, bos_token="", eos_token="", tools=None)
-        r2 = tpl.render(messages=msg2, add_generation_prompt=True, bos_token="", eos_token="", tools=None)
-        if not r2.startswith(r1_nogen) or not r_full.startswith(r1) or r1 != r1_default:
-            raise ValueError(f"{model_dir}: chat template failed assistant-turn prefix invariance or default-nothink parity")
-        if model_family == "gemma4" and ("<|turn>model" not in r1 or "<|channel>thought\n<channel|>" not in r1):
-            raise ValueError(f"{model_dir}: rendered Gemma 4 template missing non-thinking <|channel>thought\\n<channel|> sentinel")
-        if model_family == "inkling2" and (("Thinking effort level: 0<" not in r1 and "Thinking effort level: 0.0" not in r1) or "0.9" in r1):
-            raise ValueError(f"{model_dir}: rendered Inkling 2 template did not default to effort 0")
-        checked_fields["chat_template_verified"] = True
-
-    if reference_dir is not None:
-        from transformers import AutoTokenizer
-
-        ref_tok = AutoTokenizer.from_pretrained(str(reference_dir))
-        exp_tok = AutoTokenizer.from_pretrained(str(model_dir))
-        sample = [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": "Transcribe."}]}]
-        sample_full = sample + [{"role": "assistant", "content": [{"type": "text", "text": "Dear Sir"}]}]
-        if ref_tok.eos_token_id != exp_tok.eos_token_id:
-            raise ValueError(f"{model_dir}: eos_token_id {exp_tok.eos_token_id} != reference {ref_tok.eos_token_id}")
-        if (
-            ref_tok.apply_chat_template(sample, tokenize=True, add_generation_prompt=True)
-            != exp_tok.apply_chat_template(sample, tokenize=True, add_generation_prompt=True)
-            or ref_tok.apply_chat_template(sample_full, tokenize=True, add_generation_prompt=False)
-            != exp_tok.apply_chat_template(sample_full, tokenize=True, add_generation_prompt=False)
-        ):
-            raise ValueError(f"{model_dir}: tokenized chat template diverged from {reference_dir}")
-        checked_fields["reference_token_parity"] = True
-
-        tf_mod = __import__("transformers")
-        auto_proc_cls = getattr(tf_mod, "AutoProcessor", None)
-        if auto_proc_cls is not None and (model_dir / "processor_config.json").is_file() and (reference_dir / "processor_config.json").is_file():
-            try:
-                from PIL import Image
-            except ImportError:
-                Image = None  # type: ignore[assignment]
-            if Image is not None and hasattr(Image, "new"):
-                ref_proc = auto_proc_cls.from_pretrained(str(reference_dir))
-                exp_proc = auto_proc_cls.from_pretrained(str(model_dir))
-                if hasattr(Image, "frombytes"):
-                    raw_rgb = bytes(
-                        c
-                        for y in range(16)
-                        for x in range(16)
-                        for c in ((x * 16 + y) % 256, (y * 16 + 64) % 256, ((x ^ y) * 16) % 256)
-                    )
-                    raw_l = bytes((x * 13 + y * 7) % 256 for y in range(16) for x in range(16))
-                    probe_imgs = [
-                        Image.frombytes("RGB", (16, 16), raw_rgb),
-                        Image.frombytes("L", (16, 16), raw_l),
-                    ]
-                else:
-                    probe_imgs = [Image.new("RGB", (16, 16), (255, 255, 255))]
-                ref_p = ref_proc.apply_chat_template(sample, tokenize=False, add_generation_prompt=True)
-                exp_p = exp_proc.apply_chat_template(sample, tokenize=False, add_generation_prompt=True)
-
-                def _flat(v: Any) -> list[float]:
-                    if hasattr(v, "flatten"):
-                        return [float(x) for x in v.flatten().tolist()]
-                    if isinstance(v, (list, tuple)):
-                        out: list[float] = []
-                        for item in v:
-                            out.extend(_flat(item))
-                        return out
-                    return [float(v)]
-
-                for probe_img in probe_imgs:
-                    ref_enc = ref_proc(text=[ref_p], images=[probe_img], return_tensors="pt")
-                    exp_enc = exp_proc(text=[exp_p], images=[probe_img], return_tensors="pt")
-                    ref_ids = ref_enc["input_ids"][0].tolist() if hasattr(ref_enc["input_ids"][0], "tolist") else list(ref_enc["input_ids"][0])
-                    exp_ids = exp_enc["input_ids"][0].tolist() if hasattr(exp_enc["input_ids"][0], "tolist") else list(exp_enc["input_ids"][0])
-                    if ref_ids != exp_ids:
-                        raise ValueError(f"{model_dir}: multimodal AutoProcessor input_ids diverged from {reference_dir}")
-                    if "pixel_values" in ref_enc and "pixel_values" in exp_enc:
-                        r_flat, e_flat = _flat(ref_enc["pixel_values"]), _flat(exp_enc["pixel_values"])
-                        if len(r_flat) != len(e_flat) or any(abs(a - b) > 1e-4 for a, b in zip(r_flat, e_flat)):
-                            raise ValueError(f"{model_dir}: image processor pixel_values diverged from {reference_dir}")
-                checked_fields["reference_image_parity"] = True
-
-    return checked_fields
+__all__ = [
+    "export_halo_vlm_preference_dataset",
+    "export_halo_vlm_sft_dataset",
+    "verify_exported_vlm_dir",
+]
