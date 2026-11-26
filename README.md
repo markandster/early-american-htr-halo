@@ -16,15 +16,7 @@ Off-the-shelf document OCR models trained on modern printed text perform poorly 
 3. **Editorial Bracket Leakage:** Unstripped `[...]` editorial insertions and placeholder tokens bleed from archival XML conventions into clean manuscript transcriptions.
 4. **Premature Truncation & Blank-Page Hallucinations:** Stopping mid-letter or emitting archive boilerplate on blank versos.
 
-This project pairs **full-resolution trainable-vision SFT** (`scripts/training/sft.py`) with **conditional verifiable Stage 2 VLM SMPO** (`scripts/training/preference/smpo.py` with `chosen_sft_ratio: 1.0`, promoted only if `val` CER improves cleanly over Stage 1) scored deterministically by `eahtr.rewards` / `eahtr.preferences.build_preference_pairs`. *(VLM DPO and `26B-A4B` are deferred behind the primary `12B` track; text-only Halo GRPO configs are kept as contingency recipes.)*
-
----
-
-## Scope & Architectural Boundaries (Non-Goals)
-
-- **In Scope — Diplomatic Transcription with Exact Line Breaks:** Models are post-trained strictly for writer-general diplomatic transcription preserving period spelling, capitalization, punctuation, abbreviations, and **exact physical line breaks (`\n`)**, supporting downstream line-to-transcript alignment at zero extra token cost.
-- **Out of Scope — Word-Level Bounding-Box Generation:** Autoregressive per-word coordinate emission increases sequence length ~3–5× per page, worsening token-cap non-termination and repetition loops while slowing rollouts.
-- **Out of Scope — Writer Identification / Authorship Attribution:** HTR optimizes *writer-invariant* text recognition rather than author attribution.
+This project post-trains models strictly for writer-general diplomatic transcription preserving period spelling, capitalization, punctuation, abbreviations, and exact physical line breaks (`\n`), pairing **full-resolution trainable-vision SFT** (`scripts/training/sft.py`) with **conditional verifiable Stage 2 VLM SMPO** (`scripts/training/preference/smpo.py` with `chosen_sft_ratio: 1.0`, promoted only if `val` CER improves cleanly over Stage 1) scored deterministically by `eahtr.rewards` / `eahtr.preferences.build_preference_pairs`. *(VLM DPO and `26B-A4B` are deferred behind the primary `12B` track; text-only Halo GRPO configs are kept as contingency recipes.)*
 
 ---
 
