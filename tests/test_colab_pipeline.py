@@ -242,6 +242,7 @@ def test_halo_yaml_configs_match_schema_and_ink2_rules() -> None:
     assert dpo_cfg["loss_type"] == ["sigmoid", "sft"]
     assert "precompute_ref_log_probs" not in dpo_cfg
     assert "generation_max_prompt_length" not in dpo_cfg
+    assert "max_prompt_length" not in dpo_cfg
 
     for name in (
         "inkling2_mini_sft.yaml",

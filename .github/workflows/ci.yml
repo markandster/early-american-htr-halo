@@ -25,23 +25,21 @@ jobs:
       - name: Run unit tests
         run: pytest -v
 
-      - name: Validate Halo YAML templates and Colab notebook syntax
+      - name: Validate Halo YAML configs and notebook syntax
         run: |
+          python scripts/validate_halo_configs.py
           python - <<'PY'
-          import ast, glob, json, yaml
+          import ast, glob, json
           from pathlib import Path
 
-          for f in sorted(glob.glob("configs/halo/*.yaml")):
-              with open(f, "r", encoding="utf-8") as fh:
-                  data = yaml.safe_load(fh)
-              assert isinstance(data, dict) and data, f"Invalid YAML: {f}"
-              print(f"YAML OK: {f}")
-
-          nb = json.loads(Path("notebooks/colab_competition_pretrain_sft.ipynb").read_text(encoding="utf-8"))
-          assert nb["nbformat"] == 4
-          for idx, cell in enumerate(nb["cells"]):
-              if cell["cell_type"] == "code":
-                  lines = [ln for ln in cell["source"] if not ln.lstrip().startswith("!")]
-                  ast.parse("".join(lines), filename=f"cell_{idx}.py")
-          print(f"Notebook OK: {len(nb['cells'])} cells parsed cleanly")
+          for nb_file in sorted(glob.glob("notebooks/*.ipynb")):
+              if Path(nb_file).name.startswith("._"):
+                  continue
+              nb = json.loads(Path(nb_file).read_text(encoding="utf-8"))
+              assert nb["nbformat"] == 4
+              for idx, cell in enumerate(nb["cells"]):
+                  if cell["cell_type"] == "code":
+                      lines = [ln for ln in cell["source"] if not ln.lstrip().startswith("!")]
+                      ast.parse("".join(lines), filename=f"{nb_file}:cell_{idx}.py")
+              print(f"Notebook OK: {nb_file} ({len(nb['cells'])} cells)")
           PY
