@@ -166,6 +166,7 @@ def validate_vllm_engine_adapter_dir(
 
     layers_seen: set[int] = set()
     expert_counts: set[int] = set()
+    sides_by_module: dict[str, set[str]] = {}
     for key, meta in tensors.items():
         if any(bad in key for bad in _UNEXPORTED_HINTS):
             raise ValueError(
@@ -174,16 +175,22 @@ def validate_vllm_engine_adapter_dir(
         shape = meta.get("shape")
         if m := _INKLING_WO_RE.match(key):
             layers_seen.add(int(m.group(1)))
+            sides_by_module.setdefault(f"layers.{m.group(1)}.attn.wo_ud", set()).add(m.group(2))
             _validate_tensor_rank_shape(key, m.group(2), shape, r, is_expert=False, expert_counts=expert_counts)
         elif m := _INKLING_W13_RE.match(key):
             layers_seen.add(int(m.group(1)))
+            sides_by_module.setdefault(f"layers.{m.group(1)}.mlp.experts.w13_weight", set()).add(m.group(2))
             _validate_tensor_rank_shape(key, m.group(2), shape, r, is_expert=True, expert_counts=expert_counts)
         elif m := _INKLING_W2_RE.match(key):
             layers_seen.add(int(m.group(1)))
+            sides_by_module.setdefault(f"layers.{m.group(1)}.mlp.experts.w2_weight", set()).add(m.group(2))
             _validate_tensor_rank_shape(key, m.group(2), shape, r, is_expert=True, expert_counts=expert_counts)
         else:
             raise ValueError(f"{st_path}: unexpected tensor key outside Inkling engine allow-list: {key!r}")
 
+    unpaired = sorted(mod for mod, sides in sides_by_module.items() if sides != {"A", "B"})
+    if unpaired:
+        raise ValueError(f"{st_path}: unpaired LoRA A/B weights for modules: {unpaired[:5]}")
     if len(expert_counts) > 1:
         raise ValueError(f"{st_path}: inconsistent expert counts across tensors: {sorted(expert_counts)}")
 

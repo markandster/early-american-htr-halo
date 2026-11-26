@@ -44,6 +44,7 @@ def main() -> int:
     parser.add_argument("--val-jsonl", "--test-jsonl", dest="val_jsonl", type=Path, required=True, help="Dev validation JSONL (mapped to Halo internal test split)")
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--tokenizer", required=True, help="HF repo ID or staged model directory for exact token counts")
+    parser.add_argument("--revision", default=None, help="Optional pinned HF revision for --tokenizer")
     parser.add_argument("--image-root", type=Path, default=None, help="Optional directory overriding manifest image root")
     parser.add_argument("--max-length", type=int, default=4096)
     parser.add_argument("--max-prompt-length", type=int, default=1600)
@@ -56,7 +57,8 @@ def main() -> int:
 
     from transformers import AutoTokenizer
 
-    tok = AutoTokenizer.from_pretrained(args.tokenizer)
+    tok_kw = {"revision": args.revision} if args.revision else {}
+    tok = AutoTokenizer.from_pretrained(args.tokenizer, **tok_kw)
     count_fn = lambda s: len(tok(s, add_special_tokens=False)["input_ids"])
     train_rows = _resolve_row_paths(_load_jsonl(args.train_jsonl), args.train_jsonl, args.image_root)
     val_rows = _resolve_row_paths(_load_jsonl(args.val_jsonl), args.val_jsonl, args.image_root)
@@ -75,8 +77,9 @@ def main() -> int:
                 args.tokenizer,
                 max_image_tokens=args.max_image_tokens,
                 cell_size=cell_size,
+                revision=args.revision,
             )
-            vision_tokens = int(measured["max_image_tokens"])
+            vision_tokens = max(vision_tokens, int(measured["max_image_tokens"]))
 
     if args.mode == "sft":
         res = export_halo_vlm_sft_dataset(

@@ -97,7 +97,7 @@ python scripts/export_halo_datasets.py \
 
 ### Step D — Stage 1 Gemma 4 Halo SFT & Parity Export (`12b`, `26b_a4b`, `31b`)
 
-`scripts/run_gemma4_halo.sh` writes each run to a fresh `RUN_ID`-stamped directory (refusing stale non-empty outputs unless `RESUME=1`), validates the resolved YAML in an isolated folder, enforces `EP` / `NUM_GPUS` parity, and either merges PEFT adapters (`12b`, `31b`) or converts `fp32_experts` full checkpoints via Halo's `convert_to_bf16.py --verify` while preserving the `1,120`-token processor & template (`26b_a4b`, budget `~300 GB` disk):
+`scripts/run_gemma4_halo.sh` writes each run to a fresh `RUN_ID`-stamped directory (refusing stale non-empty outputs unless `RESUME=1`, which sets `resume_from_checkpoint: true`), validates the resolved YAML in an isolated folder, enforces `EP` / `NUM_GPUS` parity, and either merges PEFT adapters (`12b`, `31b`) or verifies `RESOLVE_CKPT` parity and converts `fp32_experts` full checkpoints via Halo's `convert_to_bf16.py --verify` (`26b_a4b`, budget `~400 GB` disk because checkpoint rotation briefly holds two `97 GB` checkpoints):
 
 ```bash
 # Primary: 12B Dense LoRA (1 GPU)
@@ -115,7 +115,7 @@ STAGE=sft MODEL_SIZE=31b DATASET_DIR=data/halo_vlm_sft HALO_DIR=/tmp/halo NUM_GP
 
 ### Step D.2 — Conditional `Inkling-2-Small` Export, Training (`EP=8`), and `vLLM` Serving
 
-`thinkingmachines/Inkling-2-Small` requires streaming PNG/RGB export resized to exact `40x40` grid-cell multiples within `--max-image-tokens 2000` (pinned `Pillow==13.0.0`, `LANCZOS` resampling, `--measure-vision-tokens` using `proc.image_token_id`). Training defaults to `EP=8` (`~73–85 GiB/GPU`), and serving packed weights requires `~343 GB` across GPUs on `halo:vllm-0.1.dev25249` with `--chat-template configs/halo/templates/inkling2_htr_nothink.jinja` (forcing default `reasoning_effort: 0.0`):
+`thinkingmachines/Inkling-2-Small` (`rev 885d78bfca61a7e9a498e33cfa7ad35850533b8c`) requires streaming PNG/RGB export resized to exact `40x40` grid-cell multiples within `--max-image-tokens 2000` (`LANCZOS` resampling; export metadata records the active Pillow version and filter — Halo's container locks `Pillow==12.3.0`), with `--measure-vision-tokens` using `proc.image_token_id`. Training defaults to `EP=8` (`~73–85 GiB/GPU`), and serving packed weights requires `~343 GB` across GPUs on `halo:vllm-0.1.dev25249` with `--chat-template configs/halo/templates/inkling2_htr_nothink.jinja --enable-lora` (load the exported engine adapter via `/v1/load_lora_adapter` before evaluation):
 
 ```bash
 python scripts/export_halo_datasets.py \
@@ -124,6 +124,7 @@ python scripts/export_halo_datasets.py \
   --val-jsonl data/revcity/manifests/val.jsonl \
   --out-dir data/halo_inkling2_vlm_sft \
   --tokenizer thinkingmachines/Inkling-2-Small \
+  --revision 885d78bfca61a7e9a498e33cfa7ad35850533b8c \
   --max-length 4096 --max-image-tokens 2000 --cell-size 40 \
   --measure-vision-tokens
 
@@ -132,12 +133,13 @@ STAGE=sft DATASET_DIR=data/halo_inkling2_vlm_sft HALO_DIR=/tmp/halo NUM_GPUS=8 P
 
 # On serving node (halo:vllm-0.1.dev25249), launch with:
 #   --chat-template configs/halo/templates/inkling2_htr_nothink.jinja --enable-lora
-# and verify visual grounding + zero reasoning leaks via scripts/eval_vllm_server.py:
+# then register the exported engine adapter via POST /v1/load_lora_adapter and evaluate:
 python scripts/eval_vllm_server.py \
   --base-url http://127.0.0.1:8000 --model inkling2-sft \
   --eval-jsonl data/revcity/manifests/val.jsonl \
   --engine-adapter-dir checkpoints/inkling2-small-eahtr-sft-engine-<RUN_ID> \
   --tokenizer thinkingmachines/Inkling-2-Small \
+  --revision 885d78bfca61a7e9a498e33cfa7ad35850533b8c \
   --max-image-tokens 2000 --out-json results/val_inkling2_sft.json --dual-convention
 ```
 
@@ -203,21 +205,19 @@ python scripts/export_halo_datasets.py \
   --max-length 4096 --max-prompt-length 1600 --vision-tokens 1120
 
 STAGE=smpo MODEL_SIZE=12b \
-  SFT_MERGED_DIR=checkpoints/gemma4-12b-eahtr-sft-merged \
+  SFT_MERGED_DIR=checkpoints/gemma4-12b-eahtr-sft-merged-<RUN_ID> \
   DATASET_DIR=data/halo_vlm_smpo \
   HALO_DIR=/tmp/halo NUM_GPUS=1 \
   bash scripts/run_gemma4_halo.sh
 
-# Full-weight 26B-A4B or 31B SMPO example (EP=8 / EP=4 respectively on 8 GPUs):
-# STAGE=smpo MODEL_SIZE=26b_a4b EP_SIZE=8 \
-#   SFT_MERGED_DIR=checkpoints/gemma4-26b-a4b-sft-bf16 \
-#   DATASET_DIR=data/halo_vlm_smpo \
-#   HALO_DIR=/tmp/halo NUM_GPUS=8 \
-#   bash scripts/run_gemma4_halo.sh
+# Fallback Stage 2 SMPO examples:
+#   26B-A4B MoE (EP=8 on 8x GPUs):
+#     STAGE=smpo MODEL_SIZE=26b_a4b EP_SIZE=8 SFT_MERGED_DIR=checkpoints/gemma4-26b_a4b-eahtr-sft-merged-<RUN_ID> NUM_GPUS=8 bash scripts/run_gemma4_halo.sh
+#   31B Dense LoRA (2x–8x GPU FSDP, no EP):
+#     STAGE=smpo MODEL_SIZE=31b SFT_MERGED_DIR=checkpoints/gemma4-31b-eahtr-sft-merged-<RUN_ID> NUM_GPUS=8 bash scripts/run_gemma4_halo.sh
 
-# For 12B PEFT runs, merge the Stage 1 or Stage 2 PEFT adapter into a full HuggingFace directory
-# (full-weight 26B-A4B and 31B runs convert checkpoint-N via Halo's convert_to_bf16.py --verify
-# inside run_gemma4_halo.sh into a fresh *_final_bf16 directory):
+# For PEFT runs (12b, 31b), merge the winning PEFT adapter into a full HuggingFace directory
+# (full-weight 26b_a4b runs convert checkpoint-N via Halo's convert_to_bf16.py --verify inside run_gemma4_halo.sh):
 python /tmp/halo/scripts/after_training/merge_peft_adapters.py \
   --adapter_dir checkpoints/gemma4-12b-eahtr-final-adapter \
   --output_dir checkpoints/gemma4-12b-eahtr-final-merged

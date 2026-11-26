@@ -8,7 +8,7 @@ import json
 import os
 from pathlib import Path
 import sys
-from typing import Any
+from typing import Any, Mapping
 
 from eahtr.candidates import DIPLOMATIC_PROMPT
 from eahtr.eval_harness import (
@@ -21,18 +21,35 @@ from eahtr.vision_budget import encode_image_for_vlm, parse_cell_size
 from eahtr.vllm_client import VLLMClient, VLLMClientError, validate_vllm_engine_adapter_dir
 
 
-def _count_expected_prompt_text_tokens(tokenizer_ref: str) -> int:
+def _count_expected_prompt_text_tokens(tokenizer_ref: str, *, revision: str | None = None) -> int:
     from transformers import AutoTokenizer
 
-    tok = AutoTokenizer.from_pretrained(tokenizer_ref)
+    tok_kw = {"revision": revision} if revision else {}
+    tok = AutoTokenizer.from_pretrained(tokenizer_ref, **tok_kw)
     sample = [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": DIPLOMATIC_PROMPT}]}]
-    ids = tok.apply_chat_template(sample, tokenize=True, add_generation_prompt=True)
-    if not isinstance(ids, list):
-        ids = list(ids)
-    img_tid = getattr(tok, "image_token_id", None)
-    if img_tid is not None:
-        return sum(1 for t in ids if int(t) != int(img_tid))
-    return len(ids)
+    try:
+        encoded = tok.apply_chat_template(
+            sample, tokenize=True, add_generation_prompt=True, reasoning_effort=0.0
+        )
+    except TypeError:
+        encoded = tok.apply_chat_template(sample, tokenize=True, add_generation_prompt=True)
+
+    raw_ids = encoded["input_ids"] if (isinstance(encoded, Mapping) or hasattr(encoded, "keys")) else encoded
+    ids = raw_ids.tolist() if hasattr(raw_ids, "tolist") else list(raw_ids)
+    if ids and isinstance(ids[0], list):
+        ids = ids[0]
+
+    img_tids: set[int] = set()
+    direct_tid = getattr(tok, "image_token_id", None)
+    if isinstance(direct_tid, int) and direct_tid >= 0:
+        img_tids.add(direct_tid)
+    if hasattr(tok, "convert_tokens_to_ids"):
+        unk_id = getattr(tok, "unk_token_id", None)
+        for tok_str in ("<|unused_200054|>", "<|image|>", "<image_soft_token>"):
+            cid = tok.convert_tokens_to_ids(tok_str)
+            if isinstance(cid, int) and cid >= 0 and (unk_id is None or cid != int(unk_id)):
+                img_tids.add(cid)
+    return sum(1 for t in ids if int(t) not in img_tids)
 
 
 def _verify_first_request_prompt_tokens(
@@ -75,7 +92,8 @@ def main() -> int:
     parser.add_argument("--image-format", choices=("PNG", "JPEG"), default="PNG")
     parser.add_argument("--engine-adapter-dir", type=Path, default=None, help="Optional exported Inkling engine adapter to validate before serving")
     parser.add_argument("--tokenizer", default=None, help="Optional HF repo/dir for strict first-request prompt_tokens parity")
-    parser.add_argument("--prompt-token-tolerance", type=int, default=64)
+    parser.add_argument("--revision", default=None, help="Optional pinned HF revision for --tokenizer")
+    parser.add_argument("--prompt-token-tolerance", type=int, default=1)
     parser.add_argument("--api-key-env", default="VLLM_API_KEY")
     parser.add_argument("--timeout-s", type=float, default=180.0)
     parser.add_argument("--allow-insecure-remote", action="store_true")
@@ -107,7 +125,9 @@ def main() -> int:
         timeout_s=args.timeout_s,
         allow_insecure_remote=args.allow_insecure_remote,
     )
-    expected_text_tokens = _count_expected_prompt_text_tokens(args.tokenizer) if args.tokenizer else None
+    expected_text_tokens = (
+        _count_expected_prompt_text_tokens(args.tokenizer, revision=args.revision) if args.tokenizer else None
+    )
 
     from PIL import Image
 

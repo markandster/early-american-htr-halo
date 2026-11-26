@@ -24,19 +24,16 @@ if [[ "${MODEL_SIZE}" == "12b" ]]; then
   HF_REV="43c9d014b231"
   DEFAULT_NUM_GPUS=1
   BASE_YAML="${REPO_ROOT}/configs/halo/gemma4_12b_${STAGE/smpo/vlm_smpo}.yaml"
-  DEFAULT_SFT_MERGED="${REPO_ROOT}/checkpoints/gemma4-12b-eahtr-sft-merged"
 elif [[ "${MODEL_SIZE}" == "26b_a4b" ]]; then
   HF_REPO="google/gemma-4-26B-A4B-it"
   HF_REV="4d7ae4984b7db7de8f8457170b3f1a419ee76d52"
   DEFAULT_NUM_GPUS=8
   BASE_YAML="${REPO_ROOT}/configs/halo/gemma4_26b_a4b_${STAGE/smpo/vlm_smpo}.yaml"
-  DEFAULT_SFT_MERGED="${REPO_ROOT}/checkpoints/gemma4-26b-a4b-eahtr-sft-bf16"
 elif [[ "${MODEL_SIZE}" == "31b" ]]; then
   HF_REPO="google/gemma-4-31B-it"
   HF_REV="842da3794eaa0b77d5f08bae87a17459d91ff475"
   DEFAULT_NUM_GPUS=2
   BASE_YAML="${REPO_ROOT}/configs/halo/gemma4_31b_${STAGE/smpo/vlm_smpo}.yaml"
-  DEFAULT_SFT_MERGED="${REPO_ROOT}/checkpoints/gemma4-31b-eahtr-sft-merged"
 else
   echo "ERROR: MODEL_SIZE must be one of 12b, 26b_a4b, 31b (got ${MODEL_SIZE})" >&2
   exit 1
@@ -45,6 +42,12 @@ fi
 if [[ "${STAGE}" != "sft" && "${STAGE}" != "smpo" ]]; then
   echo "ERROR: STAGE must be 'sft' or 'smpo' (got ${STAGE})" >&2
   exit 1
+fi
+if [[ "${STAGE}" == "smpo" ]]; then
+  if [[ -z "${SFT_MERGED_DIR:-}" || ! -f "${SFT_MERGED_DIR}/config.json" ]]; then
+    echo "ERROR: STAGE=smpo requires SFT_MERGED_DIR pointing to an existing Stage 1 merged/bf16 directory containing config.json." >&2
+    exit 1
+  fi
 fi
 
 NUM_GPUS="${NUM_GPUS:-${DEFAULT_NUM_GPUS}}"
@@ -69,7 +72,7 @@ RUN_CFG_DIR="${WORK_DIR}/run_cfg_${MODEL_SIZE}_${STAGE}_${RUN_ID}"
 mkdir -p "${WORK_DIR}" "${RUN_CFG_DIR}"
 
 RUN_YAML="${RUN_CFG_DIR}/$(basename "${BASE_YAML}")"
-SFT_MERGED_DIR="${SFT_MERGED_DIR:-${DEFAULT_SFT_MERGED}}"
+SFT_MERGED_DIR="${SFT_MERGED_DIR:-}"
 "${PYTHON_BIN}" - <<PY
 from pathlib import Path
 import yaml
@@ -78,6 +81,8 @@ cfg = yaml.safe_load(Path("${BASE_YAML}").read_text(encoding="utf-8"))
 cfg["model_name_or_path"] = "${STAGED_BASE}" if "${STAGE}" == "sft" else "${SFT_MERGED_DIR}"
 cfg["dataset"] = ["${DATASET_DIR}"]
 cfg["output_dir"] = "${ADAPTER_DIR}"
+if "${RESUME}" == "1":
+    cfg["resume_from_checkpoint"] = True
 if "${EP_SIZE}":
     cfg["expert_parallel_size"] = int("${EP_SIZE}")
 if "${MAX_STEPS}":
@@ -125,15 +130,16 @@ if [[ "${USE_PEFT}" == "true" ]]; then
   "${PYTHON_BIN}" "${REPO_ROOT}/scripts/verify_mlx_export.py" "${MERGED_DIR}" --reference-dir "${RESOLVED_ADAPTER}"
 else
   RESOLVED_CKPT="$("${PYTHON_BIN}" -c "from pathlib import Path; d=Path('${ADAPTER_DIR}'); cands=[d]+[p for p in sorted(d.glob('checkpoint-*'), key=lambda p: int(p.name.split('-')[-1]) if p.name.split('-')[-1].isdigit() else -1, reverse=True) if p.is_dir()]; print(next(str(p) for p in cands if (p/'config.json').is_file() and ((p/'model.safetensors').is_file() or (p/'model.safetensors.index.json').is_file())))")"
+  "${PYTHON_BIN}" "${REPO_ROOT}/scripts/verify_mlx_export.py" "${RESOLVED_CKPT}" --reference-dir "${STAGED_BASE}"
   "${PYTHON_BIN}" "${HALO_DIR}/scripts/after_training/convert_to_bf16.py" \
     --input_dir "${RESOLVED_CKPT}" --output_dir "${MERGED_DIR}" --verify
   "${PYTHON_BIN}" - <<PY
 import shutil
 from pathlib import Path
-src = Path("${STAGED_BASE}")
+src = Path("${RESOLVED_CKPT}")
 dst = Path("${MERGED_DIR}")
 for fname in ("processor_config.json", "chat_template.jinja"):
-    if (src / fname).is_file():
+    if not (dst / fname).exists() and (src / fname).is_file():
         shutil.copy2(src / fname, dst / fname)
 PY
   "${PYTHON_BIN}" "${REPO_ROOT}/scripts/verify_mlx_export.py" "${MERGED_DIR}" --reference-dir "${STAGED_BASE}"

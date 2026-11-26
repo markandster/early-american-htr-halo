@@ -9,7 +9,7 @@ from typing import Any, Callable, Sequence
 from .halo_export_verify import verify_exported_vlm_dir
 from .halo_smoke import DEFAULT_SMOKE_PROMPT, filter_vlm_rows_post_expansion
 from .hygiene import audit_split_disjointness
-from .vision_budget import compute_target_grid_dimensions, encode_image_for_vlm
+from .vision_budget import compute_target_grid_dimensions, encode_image_for_vlm, inspect_pillow_runtime
 
 
 def _normalize_msg_list(messages: Any) -> list[dict[str, Any]]:
@@ -88,7 +88,7 @@ def _encode_image_entry(
     finally:
         if hasattr(im, "close"):
             im.close()
-    return {"bytes": payload, "path": str(image_path)}
+    return {"bytes": payload, "path": None}
 
 
 def _iter_sft_examples(
@@ -216,7 +216,7 @@ def export_halo_vlm_sft_dataset(
             },
         )
         DatasetDict({"train": ds_train, "test": ds_test}).save_to_disk(str(out_dir))
-    return {
+    out_meta: dict[str, Any] = {
         "out_dir": str(out_dir),
         "train_rows": len(kept_train),
         "test_rows": len(kept_test),
@@ -224,6 +224,9 @@ def export_halo_vlm_sft_dataset(
         "dropped_test": drop_test,
         "max_vision_tokens": max(max_vis_train, max_vis_test),
     }
+    if max_image_tokens is not None:
+        out_meta["pillow_runtime"] = inspect_pillow_runtime()
+    return out_meta
 
 
 def export_halo_vlm_preference_dataset(
@@ -361,7 +364,7 @@ def export_halo_vlm_preference_dataset(
             },
         )
         DatasetDict({"train": ds_train, "test": ds_test}).save_to_disk(str(out_dir))
-    return {
+    out_meta: dict[str, Any] = {
         "out_dir": str(out_dir),
         "train_rows": len(kept_train),
         "test_rows": len(kept_test),
@@ -370,6 +373,9 @@ def export_halo_vlm_preference_dataset(
         "include_margin": include_margin,
         "max_vision_tokens": max(max_vis_train, max_vis_test),
     }
+    if max_image_tokens is not None:
+        out_meta["pillow_runtime"] = inspect_pillow_runtime()
+    return out_meta
 
 
 __all__ = [

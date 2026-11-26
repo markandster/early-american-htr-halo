@@ -21,6 +21,7 @@ from eahtr.vision_budget import (
 )
 
 HAS_PIL = importlib.util.find_spec("PIL") is not None
+HAS_DATASETS = importlib.util.find_spec("datasets") is not None
 
 
 def test_read_image_cell_size_and_grid_token_math(tmp_path: Path) -> None:
@@ -277,6 +278,7 @@ def test_streaming_export_with_budget_and_cli_image_root(tmp_path: Path, monkeyp
     )
     assert exp_cli.main() == 0
     assert saved[-1]["train"].data["images"][0][0]["bytes"] == b"PNG_OUT"
+    assert saved[-1]["train"].data["images"][0][0]["path"] is None
     assert seen_cache_dirs and not Path(seen_cache_dirs[-1]).exists()
 
     # Preference mode streaming export with --max-image-tokens and parse_cell_size
@@ -314,3 +316,83 @@ def test_streaming_export_with_budget_and_cli_image_root(tmp_path: Path, monkeyp
     )
     assert exp_cli.main() == 0
     assert saved[-1]["train"].data["images"][0][0]["bytes"] == b"PNG_OUT"
+    assert saved[-1]["train"].data["images"][0][0]["path"] is None
+
+    # --measure-vision-tokens must never lower --vision-tokens below CLI ceiling
+    seen_vis_arg: list[int] = []
+    orig_export_sft = exp_cli.export_halo_vlm_sft_dataset
+
+    def _spy_export_sft(*args: object, **kwargs: object) -> dict:
+        seen_vis_arg.append(int(kwargs["vision_tokens"]))  # type: ignore[arg-type]
+        return orig_export_sft(*args, **kwargs)
+
+    monkeypatch.setattr(exp_cli, "measure_max_vision_tokens", lambda *a, **k: {"max_image_tokens": 300})
+    monkeypatch.setattr(exp_cli, "export_halo_vlm_sft_dataset", _spy_export_sft)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "export_halo_datasets.py",
+            "--mode", "sft",
+            "--train-jsonl", str(tr_jsonl),
+            "--val-jsonl", str(va_jsonl),
+            "--out-dir", str(tmp_path / "gemma_floor_out"),
+            "--tokenizer", "stub/g4",
+            "--image-root", str(img_root),
+            "--vision-tokens", "1120",
+            "--measure-vision-tokens",
+        ],
+    )
+    assert exp_cli.main() == 0
+    assert seen_vis_arg == [1120]
+
+    if HAS_PIL and HAS_DATASETS:
+        monkeypatch.undo()
+        from PIL import Image as RealImage
+        from datasets import load_from_disk
+        from eahtr.halo_export import export_halo_vlm_preference_dataset, export_halo_vlm_sft_dataset
+
+        real_dir = tmp_path / "real_2400x3200"
+        real_dir.mkdir()
+        src_tr = real_dir / "tr.jpg"
+        src_va = real_dir / "va.jpg"
+        RealImage.new("RGB", (2400, 3200), (220, 210, 190)).save(src_tr, format="JPEG")
+        RealImage.new("RGB", (2400, 3200), (210, 200, 180)).save(src_va, format="JPEG")
+
+        sft_ds_dir = real_dir / "sft_ds"
+        sft_meta = export_halo_vlm_sft_dataset(
+            [{"record_id": "rt1", "document_id": "rd1", "writer_key": "rw1", "image_sha256": "rs1", "image_path": str(src_tr), "text": "Dear Sir"}],
+            [{"record_id": "rv1", "document_id": "rd2", "writer_key": "rw2", "image_sha256": "rs2", "image_path": str(src_va), "text": "Madam"}],
+            sft_ds_dir,
+            lambda s: len(s.split()),
+            max_image_tokens=1120,
+        )
+        assert "pillow_runtime" in sft_meta and sft_meta["pillow_runtime"]["resample_filter"] == "LANCZOS"
+        loaded_sft = load_from_disk(str(sft_ds_dir))
+        assert loaded_sft["train"][0]["images"][0].size == (1120, 1520)
+
+        pref_ds_dir = real_dir / "pref_ds"
+        pref_meta = export_halo_vlm_preference_dataset(
+            [{
+                "record_id": "rpt1", "document_id": "rd1", "writer_key": "rw1", "image_sha256": "rs1",
+                "split": "train", "images": [str(src_tr)],
+                "prompt": [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": "Transcribe."}]}],
+                "chosen": [{"role": "assistant", "content": "Dear Sir"}],
+                "rejected": [{"role": "assistant", "content": "Bad"}],
+                "margin": 0.8,
+            }],
+            [{
+                "record_id": "rpv1", "document_id": "rd2", "writer_key": "rw2", "image_sha256": "rs2",
+                "split": "val", "images": [str(src_va)],
+                "prompt": [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": "Transcribe."}]}],
+                "chosen": [{"role": "assistant", "content": "Madam"}],
+                "rejected": [{"role": "assistant", "content": "Bad"}],
+                "margin": 0.6,
+            }],
+            pref_ds_dir,
+            lambda s: len(s.split()),
+            max_image_tokens=1120,
+        )
+        assert "pillow_runtime" in pref_meta
+        loaded_pref = load_from_disk(str(pref_ds_dir))
+        assert loaded_pref["train"][0]["images"][0].size == (1120, 1520)

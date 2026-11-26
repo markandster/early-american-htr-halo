@@ -11,7 +11,7 @@ from typing import Any, Mapping, Sequence
 DEFAULT_INKLING_CELL_SIZE = (40, 40)
 DEFAULT_IMAGE_TOKEN_STR = "<|unused_200054|>"
 RESAMPLE_FILTER_NAME = "LANCZOS"
-PINNED_PILLOW_VERSION = "13.0.0"
+PINNED_PILLOW_VERSION = "12.3.0"
 
 
 def _resolve_lanczos_filter(image_mod: Any) -> Any:
@@ -206,6 +206,7 @@ def measure_max_vision_tokens(
     cell_size: tuple[int, int] | None = None,
     expected_image_token: str = DEFAULT_IMAGE_TOKEN_STR,
     prompt_text: str = "Transcribe.",
+    revision: str | None = None,
 ) -> dict[str, Any]:
     """Measure realized processor image-token count across sample pages, failing closed on 0 tokens."""
     if not image_paths:
@@ -214,7 +215,8 @@ def measure_max_vision_tokens(
     from PIL import Image
     from transformers import AutoProcessor
 
-    proc = AutoProcessor.from_pretrained(str(processor_dir_or_id))
+    proc_kw = {"revision": revision} if revision else {}
+    proc = AutoProcessor.from_pretrained(str(processor_dir_or_id), **proc_kw)
     tok = getattr(proc, "tokenizer", None)
 
     img_tid = getattr(proc, "image_token_id", None)

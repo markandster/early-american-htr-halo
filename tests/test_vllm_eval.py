@@ -76,6 +76,14 @@ def test_engine_adapter_allow_list_accepts_exact_keys_and_rejects_bad_keys(tmp_p
         with pytest.raises(ValueError):
             validate_vllm_engine_adapter_dir(good)
 
+    # Unpaired lora_A without lora_B fails closed
+    _write_safetensors(
+        good / "adapter_model.safetensors",
+        {"base_model.model.model.llm.layers.0.attn.wo_ud.lora_A.weight": {"dtype": "BF16", "shape": [8, 4608], "data_offsets": [0, 8]}},
+    )
+    with pytest.raises(ValueError, match="unpaired LoRA A/B"):
+        validate_vllm_engine_adapter_dir(good)
+
     # Corrupt safetensors header fails closed
     bad_st = tmp_path / "bad.safetensors"
     bad_st.write_bytes(struct.pack("<Q", 99999999) + b"{}")
@@ -271,33 +279,47 @@ def test_eval_vllm_server_cli_parity_reasoning_leak_and_swap(tmp_path: Path, mon
     )
     assert cli.main() == 2
 
-    # With --tokenizer set, prompt_tokens outside tolerance fails closed while aligned count passes
-    class _TokParity:
-        image_token_id = 200054
+    # BatchEncoding dict without tok.image_token_id uses convert_tokens_to_ids('<|unused_200054|>')
+    # and catches a 2-token reasoning-effort shift (0.9 vs 0.0) under default tolerance=1
+    class _TokBatchEncoding:
+        unk_token_id = 0
 
         @classmethod
-        def from_pretrained(cls, path: str) -> "_TokParity":
+        def from_pretrained(cls, path: str, **kwargs: object) -> "_TokBatchEncoding":
             return cls()
 
-        def apply_chat_template(self, msgs: object, tokenize: bool = True, add_generation_prompt: bool = True) -> list[int]:
-            return [1, 200054, 2, 3, 4]  # 4 non-image text tokens
+        def convert_tokens_to_ids(self, tok_str: str) -> int:
+            return 200054 if tok_str == "<|unused_200054|>" else 0
+
+        def apply_chat_template(
+            self, msgs: object, tokenize: bool = True, add_generation_prompt: bool = True, **kwargs: object
+        ) -> dict:
+            return {"input_ids": [[1, 200054, 2, 3, 4]], "attention_mask": [[1, 1, 1, 1, 1]]}
 
     fake_tf = types.ModuleType("transformers")
-    fake_tf.AutoTokenizer = _TokParity  # type: ignore[attr-defined]
+    fake_tf.AutoTokenizer = _TokBatchEncoding  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "transformers", fake_tf)
 
-    # 80x80 -> 4 img tokens + 4 text tokens = 8 expected; 90 exceeds tol=8
+    # 80x80 -> 4 img tokens + 4 text tokens = 8 expected; 10 (+2 effort shift) fails default tol=1
     monkeypatch.setattr(
         "eahtr.vllm_client.urlopen",
-        lambda req, timeout=0: _FakeResp({"choices": [{"finish_reason": "stop", "message": {"content": "Dear Sir"}}], "usage": {"prompt_tokens": 90, "completion_tokens": 2}}),
+        lambda req, timeout=0: _FakeResp({"choices": [{"finish_reason": "stop", "message": {"content": "Dear Sir"}}], "usage": {"prompt_tokens": 10, "completion_tokens": 2}}),
     )
     monkeypatch.setattr(
         sys,
         "argv",
-        ["eval_vllm_server.py", "--base-url", "http://127.0.0.1:8000", "--model", "m", "--eval-jsonl", str(val_jsonl), "--image-root", str(img_dir), "--out-json", str(out_json), "--cell-size", "40", "--tokenizer", "stub/ink", "--prompt-token-tolerance", "8"],
+        ["eval_vllm_server.py", "--base-url", "http://127.0.0.1:8000", "--model", "m", "--eval-jsonl", str(val_jsonl), "--image-root", str(img_dir), "--out-json", str(out_json), "--cell-size", "40", "--tokenizer", "stub/ink"],
     )
     with pytest.raises(RuntimeError, match="prompt_tokens parity drift"):
         cli.main()
+
+    # Aligned 8 tokens passes cleanly
+    ok_replies = iter([
+        {"choices": [{"finish_reason": "stop", "message": {"content": "Dear Sir"}}], "usage": {"prompt_tokens": 8, "completion_tokens": 2}},
+        {"choices": [{"finish_reason": "stop", "message": {"content": "Madam"}}], "usage": {"prompt_tokens": 8, "completion_tokens": 1}},
+    ])
+    monkeypatch.setattr("eahtr.vllm_client.urlopen", lambda req, timeout=0: _FakeResp(next(ok_replies)))
+    assert cli.main() == 0
 
 
 def test_halo_launcher_ep_parity_and_fresh_dir_guards(tmp_path: Path) -> None:
@@ -316,6 +338,24 @@ def test_halo_launcher_ep_parity_and_fresh_dir_guards(tmp_path: Path) -> None:
         env = {**os.environ, "DATASET_DIR": str(ds_dir), "ADAPTER_DIR": str(non_empty_out), **extra}
         res = subprocess.run(["bash", str(repo_root / "scripts" / script_name)], env=env, capture_output=True, text=True)
         assert res.returncode != 0 and "non-empty" in res.stderr
+
+    # Stage 2 SMPO without explicit SFT_MERGED_DIR/config.json fails fast on Gemma launcher
+    res_smpo_g4 = subprocess.run(
+        ["bash", str(repo_root / "scripts" / "run_gemma4_halo.sh")],
+        env={**os.environ, "STAGE": "smpo", "MODEL_SIZE": "12b", "DATASET_DIR": str(ds_dir)},
+        capture_output=True,
+        text=True,
+    )
+    assert res_smpo_g4.returncode != 0 and "SFT_MERGED_DIR" in res_smpo_g4.stderr
+
+    # Inkling STAGE=smpo without ALLOW_BASE_SMPO=1 fails fast
+    res_smpo_ink = subprocess.run(
+        ["bash", str(repo_root / "scripts" / "run_inkling2_halo.sh")],
+        env={**os.environ, "STAGE": "smpo", "DATASET_DIR": str(ds_dir)},
+        capture_output=True,
+        text=True,
+    )
+    assert res_smpo_ink.returncode != 0 and "ALLOW_BASE_SMPO=1" in res_smpo_ink.stderr
 
     # Existing ENGINE_ADAPTER_DIR fails fast on Inkling launcher
     existing_engine = tmp_path / "existing_engine"

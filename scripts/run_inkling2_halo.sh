@@ -30,6 +30,10 @@ if [[ "${STAGE}" != "sft" && "${STAGE}" != "smpo" ]]; then
   echo "ERROR: STAGE must be 'sft' or 'smpo' (got ${STAGE})" >&2
   exit 1
 fi
+if [[ "${STAGE}" == "smpo" && "${ALLOW_BASE_SMPO:-0}" != "1" ]]; then
+  echo "ERROR: Inkling STAGE=smpo cannot reload frozen-quantized SFT adapters in Halo 53fe34a and trains from base; set ALLOW_BASE_SMPO=1 to run Stage 2 from base." >&2
+  exit 1
+fi
 
 BASE_YAML="${REPO_ROOT}/configs/halo/inkling2_small_${STAGE/smpo/vlm_smpo}.yaml"
 ADAPTER_DIR="${ADAPTER_DIR:-${WORK_DIR}/inkling2-small-eahtr-${STAGE}-${RUN_ID}}"
@@ -59,8 +63,12 @@ import yaml
 
 cfg = yaml.safe_load(Path("${BASE_YAML}").read_text(encoding="utf-8"))
 cfg["model_name_or_path"] = "${MODEL_DIR}"
+if "${MODEL_DIR}" == "thinkingmachines/Inkling-2-Small":
+    cfg["model_revision"] = "${HF_REV}"
 cfg["dataset"] = ["${DATASET_DIR}"]
 cfg["output_dir"] = "${ADAPTER_DIR}"
+if "${RESUME}" == "1":
+    cfg["resume_from_checkpoint"] = True
 if "${EP_SIZE}":
     cfg["expert_parallel_size"] = int("${EP_SIZE}")
 if "${MAX_STEPS}":
@@ -99,13 +107,15 @@ MIN_LOG_STEPS="${MAX_STEPS:-5}"
 
 RESOLVED_ADAPTER="$("${PYTHON_BIN}" -c "from pathlib import Path; d=Path('${ADAPTER_DIR}'); cands=[d]+[p for p in sorted(d.glob('checkpoint-*'), key=lambda p: int(p.name.split('-')[-1]) if p.name.split('-')[-1].isdigit() else -1, reverse=True) if p.is_dir()]; print(next(str(p) for p in cands if (p/'adapter_model.safetensors').is_file()))")"
 EXTRA_REV_ARGS=()
+EVAL_REV_ARGS=()
 if [[ "${MODEL_DIR}" == "thinkingmachines/Inkling-2-Small" ]]; then
   EXTRA_REV_ARGS=(--base_revision "${HF_REV}")
+  EVAL_REV_ARGS=(--revision "${HF_REV}")
 fi
 "${PYTHON_BIN}" "${HALO_DIR}/scripts/after_training/export_engine_adapter.py" \
   --adapter_dir "${RESOLVED_ADAPTER}" \
   --output_dir "${ENGINE_ADAPTER_DIR}" \
-  "${EXTRA_REV_ARGS[@]}"
+  ${EXTRA_REV_ARGS[@]+"${EXTRA_REV_ARGS[@]}"}
 
 "${PYTHON_BIN}" -c "from pathlib import Path; from eahtr.vllm_client import validate_vllm_engine_adapter_dir; print('Validated engine adapter:', validate_vllm_engine_adapter_dir(Path('${ENGINE_ADAPTER_DIR}')))"
 
@@ -114,17 +124,17 @@ if [[ -n "${VLLM_BASE_URL}" && -n "${EVAL_JSONL}" ]]; then
   [[ -n "${IMAGE_ROOT}" ]] && IMG_ROOT_ARGS=(--image-root "${IMAGE_ROOT}")
   "${PYTHON_BIN}" "${REPO_ROOT}/scripts/eval_vllm_server.py" \
     --base-url "${VLLM_BASE_URL}" --model "${VLLM_MODEL}" \
-    --eval-jsonl "${EVAL_JSONL}" "${IMG_ROOT_ARGS[@]}" \
+    --eval-jsonl "${EVAL_JSONL}" ${IMG_ROOT_ARGS[@]+"${IMG_ROOT_ARGS[@]}"} \
     --engine-adapter-dir "${ENGINE_ADAPTER_DIR}" \
-    --tokenizer "${MODEL_DIR}" \
+    --tokenizer "${MODEL_DIR}" ${EVAL_REV_ARGS[@]+"${EVAL_REV_ARGS[@]}"} \
     --max-image-tokens 2000 \
     --out-json "${WORK_DIR}/val_inkling2_${STAGE}_${RUN_ID}.json" \
     --dual-convention
   "${PYTHON_BIN}" "${REPO_ROOT}/scripts/eval_vllm_server.py" \
     --base-url "${VLLM_BASE_URL}" --model "${VLLM_MODEL}" \
-    --eval-jsonl "${EVAL_JSONL}" "${IMG_ROOT_ARGS[@]}" \
+    --eval-jsonl "${EVAL_JSONL}" ${IMG_ROOT_ARGS[@]+"${IMG_ROOT_ARGS[@]}"} \
     --engine-adapter-dir "${ENGINE_ADAPTER_DIR}" \
-    --tokenizer "${MODEL_DIR}" \
+    --tokenizer "${MODEL_DIR}" ${EVAL_REV_ARGS[@]+"${EVAL_REV_ARGS[@]}"} \
     --max-image-tokens 2000 \
     --swap-images \
     --out-json "${WORK_DIR}/val_inkling2_${STAGE}_${RUN_ID}_swap.json"
