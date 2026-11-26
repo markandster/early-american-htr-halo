@@ -113,6 +113,34 @@ STAGE=sft MODEL_SIZE=31b DATASET_DIR=data/halo_vlm_sft HALO_DIR=/tmp/halo NUM_GP
   bash scripts/run_gemma4_halo.sh
 ```
 
+### Step D.2 — Conditional `Inkling-2-Small` Export, Training (`EP=8`), and `vLLM` Serving
+
+`thinkingmachines/Inkling-2-Small` requires streaming PNG/RGB export resized to exact `40x40` grid-cell multiples within `--max-image-tokens 2000` (pinned `Pillow==13.0.0`, `LANCZOS` resampling, `--measure-vision-tokens` using `proc.image_token_id`). Training defaults to `EP=8` (`~73–85 GiB/GPU`), and serving packed weights requires `~343 GB` across GPUs on `halo:vllm-0.1.dev25249` with `--chat-template configs/halo/templates/inkling2_htr_nothink.jinja` (forcing default `reasoning_effort: 0.0`):
+
+```bash
+python scripts/export_halo_datasets.py \
+  --mode sft \
+  --train-jsonl data/revcity/manifests/train.jsonl \
+  --val-jsonl data/revcity/manifests/val.jsonl \
+  --out-dir data/halo_inkling2_vlm_sft \
+  --tokenizer thinkingmachines/Inkling-2-Small \
+  --max-length 4096 --max-image-tokens 2000 --cell-size 40 \
+  --measure-vision-tokens
+
+STAGE=sft DATASET_DIR=data/halo_inkling2_vlm_sft HALO_DIR=/tmp/halo NUM_GPUS=8 PILOT_MODE=1 \
+  bash scripts/run_inkling2_halo.sh
+
+# On serving node (halo:vllm-0.1.dev25249), launch with:
+#   --chat-template configs/halo/templates/inkling2_htr_nothink.jinja --enable-lora
+# and verify visual grounding + zero reasoning leaks via scripts/eval_vllm_server.py:
+python scripts/eval_vllm_server.py \
+  --base-url http://127.0.0.1:8000 --model inkling2-sft \
+  --eval-jsonl data/revcity/manifests/val.jsonl \
+  --engine-adapter-dir checkpoints/inkling2-small-eahtr-sft-engine-<RUN_ID> \
+  --tokenizer thinkingmachines/Inkling-2-Small \
+  --max-image-tokens 2000 --out-json results/val_inkling2_sft.json --dual-convention
+```
+
 ### Step E — Validation Eval, Image-Swap Causal Check & Repetition-Penalty Baseline
 
 ```bash
