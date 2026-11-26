@@ -18,6 +18,8 @@ Off-the-shelf document OCR models trained on modern printed text perform poorly 
 
 This project post-trains models strictly for writer-general diplomatic transcription preserving period spelling, capitalization, punctuation, abbreviations, and exact physical line breaks (`\n`), pairing **full-resolution trainable-vision SFT** (`scripts/training/sft.py`) with **conditional verifiable Stage 2 VLM SMPO** (`scripts/training/preference/smpo.py` with `chosen_sft_ratio: 1.0`, promoted only if `val` CER improves cleanly over Stage 1) scored deterministically by `eahtr.rewards` / `eahtr.preferences.build_preference_pairs`. *(Text-only Halo GRPO configs are kept as contingency recipes.)*
 
+See [docs/BACKGROUND.md](docs/BACKGROUND.md) for the pre-competition empirical motivation—how earlier exploratory HTR runs exposed absorbing dash loops, editorial bracket leakage, and unseen-writer reversals despite validation gains.
+
 ---
 
 ## Verifiable Archival Reward Function & VLM Preference Engine
@@ -61,7 +63,9 @@ See [docs/TRAINING_PLAN.md](docs/TRAINING_PLAN.md) for the full competition trai
 ```text
 ├── .github/workflows/ci.yml      # Automated pytest, Halo YAML Tier-1, & notebook AST CI
 ├── configs/halo/                 # Halo SFT, VLM SMPO, contingency GRPO YAMLs & Jinja templates
-├── docs/TRAINING_PLAN.md         # Full competition training plan & verification ledger
+├── docs/
+│   ├── BACKGROUND.md             # Pre-competition prior HTR findings & design rationale
+│   └── TRAINING_PLAN.md          # Full competition training plan & verification ledger
 ├── notebooks/
 │   ├── colab_competition_pretrain_sft.ipynb  # Public-corpus Colab SFT, val eval, & Stage-2 rollouts
 │   └── colab_halo_smoke.ipynb                # Pre-competition 1x GPU 5-step Halo smoke notebook
