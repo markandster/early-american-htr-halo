@@ -61,6 +61,7 @@ else
 fi
 
 python3 -c "from pathlib import Path; from eahtr.halo_smoke import verify_halo_run_log_finite_loss; print('Losses verified:', verify_halo_run_log_finite_loss(Path('${LOG_FILE}'), min_steps=5))"
+RESOLVED_ADAPTER="$(python3 -c "from pathlib import Path; d=Path('${ADAPTER_DIR}'); cands=[d]+[p for p in sorted(d.glob('checkpoint-*'), key=lambda p: int(p.name.split('-')[-1]) if p.name.split('-')[-1].isdigit() else -1, reverse=True) if p.is_dir()]; print(next(str(p) for p in cands if (p/'adapter_model.safetensors').is_file()))")"
 python3 "${HALO_DIR}/scripts/after_training/merge_peft_adapters.py" \
-  --adapter_dir "${ADAPTER_DIR}" --output_dir "${MERGED_DIR}"
+  --adapter_dir "${RESOLVED_ADAPTER}" --output_dir "${MERGED_DIR}"
 python3 "${REPO_ROOT}/scripts/verify_mlx_export.py" "${MERGED_DIR}" --reference-dir "${STAGED_BASE}"

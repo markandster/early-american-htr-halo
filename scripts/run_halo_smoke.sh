@@ -99,7 +99,7 @@ collator = VLMDataCollator(
     model_config=AutoConfig.from_pretrained(str(staged_dir)),
     generation_config=GenerationConfig.from_pretrained(str(staged_dir)),
 )
-batch0 = collator([ds["train"][0]])
+batch0 = collator([{"history": ds["train"][0]["messages"], "images": ds["train"][0]["images"]}])
 img_tid = getattr(tok, "image_token_id", None) or tok.get_vocab()["<|image|>"]
 b0_img = int((batch0["input_ids"][0] == img_tid).sum().item())
 assert 281 <= b0_img <= 1120, f"Collated batch-0 image token collapse: {b0_img}"
@@ -123,19 +123,20 @@ cd "${REPO_ROOT}"
 HALO_FLEX_SLIDING="${FLEX_ENV}" "${SMOKE_VENV}/bin/python" "${HALO_DIR}/scripts/training/sft.py" "${WORK_DIR}/configs/smoke_sft.yaml" 2>&1 | tee "${WORK_DIR}/configs/sft_run.log"
 "${SMOKE_VENV}/bin/python" -c "from pathlib import Path; from eahtr.halo_smoke import verify_halo_run_log_finite_loss; print('SFT losses:', verify_halo_run_log_finite_loss(Path('${WORK_DIR}/configs/sft_run.log'), min_steps=5))"
 
-echo "Merging Stage 1 SFT adapter via Halo merge_peft_adapters.py..."
+RESOLVED_SFT_ADAPTER="$("${SMOKE_VENV}/bin/python" -c "from pathlib import Path; d=Path('${WORK_DIR}/configs/sft_out'); cands=[d]+[p for p in sorted(d.glob('checkpoint-*'), key=lambda p: int(p.name.split('-')[-1]) if p.name.split('-')[-1].isdigit() else -1, reverse=True) if p.is_dir()]; print(next(str(p) for p in cands if (p/'adapter_model.safetensors').is_file()))")"
+echo "Merging Stage 1 SFT adapter (${RESOLVED_SFT_ADAPTER}) via Halo merge_peft_adapters.py..."
 "${SMOKE_VENV}/bin/python" "${HALO_DIR}/scripts/after_training/merge_peft_adapters.py" \
-  --adapter_dir "${WORK_DIR}/configs/sft_out" --output_dir "${WORK_DIR}/configs/sft_merged"
+  --adapter_dir "${RESOLVED_SFT_ADAPTER}" --output_dir "${WORK_DIR}/configs/sft_merged"
 "${SMOKE_VENV}/bin/python" "${REPO_ROOT}/scripts/verify_mlx_export.py" "${WORK_DIR}/configs/sft_merged" --reference-dir "${WORK_DIR}/gemma4_12b_highres"
 
 echo "Checking Stage 1 -> Stage 2 fresh-process log-prob continuity and stop termination..."
 "${SMOKE_VENV}/bin/python" - <<PY
+import json, subprocess, sys
 from pathlib import Path
 import torch
-from PIL import Image
 from datasets import load_from_disk
 from safetensors.torch import load_file
-from transformers import AutoModelForImageTextToText, AutoProcessor
+from transformers import AutoModelForImageTextToText, AutoProcessor, BitsAndBytesConfig
 from eahtr.candidates import DIPLOMATIC_PROMPT
 from eahtr.halo_smoke import verify_stage_continuity_logprobs
 
@@ -145,9 +146,11 @@ row0 = ds[0]
 img = row0["images"][0].convert("RGB")
 ref_text = row0["messages"][1]["content"][0]["text"]
 
-adapter_st = load_file(str(work / "configs" / "sft_out" / "adapter_model.safetensors"))
+adapter_st = load_file(str(Path("${RESOLVED_SFT_ADAPTER}") / "adapter_model.safetensors"))
 vision_deltas = [v.float().abs().max().item() for k, v in adapter_st.items() if "vision" in k]
 assert vision_deltas and max(vision_deltas) > 0.0, "Stage 1 Halo SFT recorded zero vision parameter updates"
+
+bnb_cfg = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_use_double_quant=True, bnb_4bit_compute_dtype=torch.bfloat16)
 
 def _score_mean_lp(model_path: Path, check_generate: bool = False) -> list[float]:
     proc = AutoProcessor.from_pretrained(str(model_path))
@@ -155,11 +158,12 @@ def _score_mean_lp(model_path: Path, check_generate: bool = False) -> list[float
         [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": DIPLOMATIC_PROMPT}]}],
         tokenize=False, add_generation_prompt=True,
     )
-    tok = getattr(proc, "tokenizer", proc)
     full = prompt + ref_text + "<turn|>"
     p_in = proc(text=[prompt], images=[img], return_tensors="pt")
     f_in = proc(text=[full], images=[img], return_tensors="pt")
-    mdl = AutoModelForImageTextToText.from_pretrained(str(model_path), torch_dtype=torch.bfloat16, device_map="auto", attn_implementation="sdpa")
+    mdl = AutoModelForImageTextToText.from_pretrained(
+        str(model_path), torch_dtype=torch.bfloat16, device_map="auto", attn_implementation="sdpa", quantization_config=bnb_cfg,
+    )
     mdl.eval()
     with torch.no_grad():
         dev_in = {k: v.to(mdl.device) if torch.is_tensor(v) else v for k, v in f_in.items()}
@@ -177,9 +181,54 @@ def _score_mean_lp(model_path: Path, check_generate: bool = False) -> list[float
 
 base_lps = _score_mean_lp(work / "gemma4_12b_highres")
 sft_lps = _score_mean_lp(work / "configs" / "sft_merged", check_generate=True)
-stage2_lps = _score_mean_lp(work / "configs" / "sft_merged")
+
+stage2_probe = """
+import json, sys
+from pathlib import Path
+import torch
+from datasets import load_from_disk
+from peft import get_peft_model
+from halo.configs.parallelism_arguments import ParallelismArguments
+from halo.configs.preference import SMPOConfig, SMPOScriptArguments
+from halo.configs.script_arguments import ModelArguments
+from halo.entrypoints.data_setup import apply_vision_options, load_script_datasets, resolve_preference_vlm_run
+from halo.entrypoints.model_setup import default_padded_attn_implementation, load_policy_model
+from halo.entrypoints.script import init_training_script, parse_script_args
+from halo.model_loading.parallel.peft_setup import configure_adapter_training
+from halo.trainers.preference.smpo import SMPOTrainer
+from eahtr.candidates import DIPLOMATIC_PROMPT
+
+work = Path(sys.argv[1])
+sys.argv = ["smpo.py", str(work / "configs" / "smoke_vlm_smpo.yaml")]
+s_args, s_cfg, m_cfg, d_args = parse_script_args(SMPOScriptArguments, SMPOConfig, ModelArguments, ParallelismArguments)
+ctx = init_training_script(s_args, s_cfg, m_cfg, d_args, script_prefix="smpo", trainer_cls=SMPOTrainer)
+ds_s, _ = load_script_datasets(s_args, ctx.parallelism_config)
+is_vlm_s = resolve_preference_vlm_run(s_args, m_cfg, ds_s, text_only_model=s_args.text_only_model, method="SMPO")
+policy = load_policy_model(ctx, s_cfg, m_cfg, s_args, vlm_run=is_vlm_s, attn_default=default_padded_attn_implementation(m_cfg, sinks_reset=s_args.reset_sinks, context_parallel=False))
+mdl = policy.model
+peft_cfg = configure_adapter_training(s_args, mdl, m_cfg, "CAUSAL_LM")
+if peft_cfg is not None:
+    mdl = get_peft_model(mdl, peft_cfg)
+apply_vision_options(s_args, mdl, m_cfg, policy.processing_class, is_vlm=is_vlm_s)
+proc = policy.processing_class
+row0 = load_from_disk(str(work / "datasets" / "sft"))["train"][0]
+img = row0["images"][0].convert("RGB")
+ref_text = row0["messages"][1]["content"][0]["text"]
+prompt = proc.apply_chat_template([{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": DIPLOMATIC_PROMPT}]}], tokenize=False, add_generation_prompt=True)
+p_in = proc(text=[prompt], images=[img], return_tensors="pt")
+f_in = proc(text=[prompt + ref_text + "<turn|>"], images=[img], return_tensors="pt")
+mdl.eval()
+with torch.no_grad():
+    dev_in = {k: v.to(mdl.device) if torch.is_tensor(v) else v for k, v in f_in.items()}
+    logits = mdl(**dev_in).logits[0]
+    p_len = p_in["input_ids"].shape[1]
+    lps = torch.log_softmax(logits[p_len - 1 : -1].float(), dim=-1).gather(-1, dev_in["input_ids"][0, p_len:].unsqueeze(-1)).squeeze(-1)
+print(json.dumps([float(x) for x in lps[:16].cpu().tolist()]))
+"""
+raw_s2 = subprocess.check_output([sys.executable, "-c", stage2_probe, str(work)], text=True).strip().splitlines()[-1]
+stage2_lps = json.loads(raw_s2)
 report = verify_stage_continuity_logprobs(base_lps, sft_lps, stage2_lps)
-print("Verified Stage 1->2 continuity:", report)
+print("Verified Stage 1->2 continuity (via Halo SMPO loader):", report)
 PY
 
 HALO_FLEX_SLIDING="${FLEX_ENV}" "${SMOKE_VENV}/bin/python" "${HALO_DIR}/scripts/training/preference/smpo.py" "${WORK_DIR}/configs/smoke_vlm_smpo.yaml" 2>&1 | tee "${WORK_DIR}/configs/smpo_run.log"
