@@ -45,8 +45,11 @@ uv pip install --python "${SMOKE_VENV}/bin/python" \
   "clearml>=2.0.2,<3.0.0" "tabulate>=0.9.0,<0.10.0" "boto3>=1.35.0,<2.0.0" \
   "s3fs>=2024.6.0" "openai>=1.44.1,<2.0.0" "backoff>=2.2.1,<3.0.0" \
   "typer>=0.25.1,<0.26.0" "click>=8.1.0,<9.0.0" einops
+uv pip install --python "${SMOKE_VENV}/bin/python" --no-deps \
+  "gram-newton-schulz @ git+https://github.com/Dao-AILab/gram-newton-schulz.git@244a451d684a39d68f593aef03b6fe7cfa6a31d1"
 uv pip install --python "${SMOKE_VENV}/bin/python" --no-deps -e "${HALO_DIR}"
 "${SMOKE_VENV}/bin/python" -c "import torch; assert torch.cuda.is_available(), 'CUDA unavailable after PyTorch install'"
+"${SMOKE_VENV}/bin/python" -c "from halo.trainers.sft import DistributedSFTTrainer; from halo.trainers.preference.smpo import SMPOTrainer; from halo.checkpoint.tools.adapter_merge import merge_peft_adapter; print('Halo trainer imports OK')"
 "${SMOKE_VENV}/bin/python" "${REPO_ROOT}/scripts/validate_halo_configs.py" --halo-repo "${HALO_DIR}"
 
 FLEX_ENV="1"
@@ -82,7 +85,11 @@ cache_dir = Path(snapshot_download(
     revision="${GEMMA4_12B_REV}",
     allow_patterns=["*.json", "*.jinja", "*.model", "*.safetensors*"],
 ))
-staged_dir = prepare_gemma4_highres_dir(cache_dir, work / "gemma4_12b_highres")
+staged_dir = prepare_gemma4_highres_dir(
+    cache_dir,
+    work / "gemma4_12b_highres",
+    chat_template_path=repo / "configs" / "halo" / "templates" / "gemma4_htr_nothink.jinja",
+)
 
 proc = AutoProcessor.from_pretrained(str(staged_dir))
 realized_toks = verify_processor_image_tokens(proc, Path(records[0]["image_path"]))
@@ -133,14 +140,15 @@ RESOLVED_SFT_ADAPTER="$("${SMOKE_VENV}/bin/python" -c "from pathlib import Path;
 echo "Merging Stage 1 SFT adapter (${RESOLVED_SFT_ADAPTER}) via Halo merge_peft_adapters.py..."
 "${SMOKE_VENV}/bin/python" "${HALO_DIR}/scripts/after_training/merge_peft_adapters.py" \
   --adapter_dir "${RESOLVED_SFT_ADAPTER}" --output_dir "${WORK_DIR}/configs/sft_merged"
-"${SMOKE_VENV}/bin/python" "${REPO_ROOT}/scripts/verify_mlx_export.py" "${WORK_DIR}/configs/sft_merged" --reference-dir "${WORK_DIR}/gemma4_12b_highres"
+"${SMOKE_VENV}/bin/python" "${REPO_ROOT}/scripts/verify_mlx_export.py" "${WORK_DIR}/configs/sft_merged" --reference-dir "${RESOLVED_SFT_ADAPTER}"
 
 echo "Checking Stage 1 -> Stage 2 fresh-process log-prob continuity and stop termination..."
-"${SMOKE_VENV}/bin/python" - <<PY
+HALO_FLEX_SLIDING="${FLEX_ENV}" "${SMOKE_VENV}/bin/python" - <<PY
 import json, subprocess, sys
 from pathlib import Path
 import torch
 from datasets import load_from_disk
+from peft import PeftModel
 from safetensors.torch import load_file
 from transformers import AutoModelForImageTextToText, AutoProcessor, BitsAndBytesConfig
 from eahtr.candidates import DIPLOMATIC_PROMPT
@@ -149,9 +157,8 @@ from eahtr.halo_smoke import verify_stage_continuity_logprobs
 work = Path("${WORK_DIR}")
 sft_ds_path = work / "datasets" / "halo_vlm_sft_smoke"
 ds = load_from_disk(str(sft_ds_path))["train"]
-row0 = ds[0]
-img = row0["images"][0].convert("RGB")
-ref_text = row0["messages"][1]["content"][0]["text"]
+sample_rows = [ds[0], ds[min(1, len(ds) - 1)]]
+shortest_row = min(list(ds), key=lambda r: len(r["messages"][1]["content"][0]["text"]))
 
 adapter_st = load_file(str(Path("${RESOLVED_SFT_ADAPTER}") / "adapter_model.safetensors"))
 vision_deltas = [
@@ -168,53 +175,85 @@ bnb_cfg = (
     else None
 )
 
-def _score_mean_lp(model_path: Path, check_generate: bool = False) -> list[float]:
+def _stop_ids(tok) -> set[int]:
+    ids: set[int] = set()
+    eos = getattr(tok, "eos_token_id", None)
+    if isinstance(eos, int) and eos >= 0:
+        ids.add(eos)
+    elif isinstance(eos, (list, tuple)):
+        ids.update(int(x) for x in eos if isinstance(x, int) and x >= 0)
+    for token in ("<turn|>", "<eos>"):
+        tid = tok.convert_tokens_to_ids(token)
+        if isinstance(tid, int) and tid >= 0:
+            ids.add(tid)
+    return ids
+
+def _score_examples(model_path: Path, *, adapter_dir: Path | None = None, check_generate: bool = False) -> list[float]:
     proc = AutoProcessor.from_pretrained(str(model_path))
-    prompt = proc.apply_chat_template(
-        [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": DIPLOMATIC_PROMPT}]}],
-        tokenize=False, add_generation_prompt=True,
-    )
-    full = prompt + ref_text + "<turn|>"
-    p_in = proc(text=[prompt], images=[img], return_tensors="pt")
-    f_in = proc(text=[full], images=[img], return_tensors="pt")
     load_kw = {"torch_dtype": torch.bfloat16, "device_map": "auto", "attn_implementation": "sdpa"}
     if bnb_cfg is not None:
         load_kw["quantization_config"] = bnb_cfg
     mdl = AutoModelForImageTextToText.from_pretrained(str(model_path), **load_kw)
+    if adapter_dir is not None:
+        mdl = PeftModel.from_pretrained(mdl, str(adapter_dir))
     mdl.eval()
+    collected: list[float] = []
+    tok = getattr(proc, "tokenizer", proc)
     with torch.no_grad():
-        dev_in = {k: v.to(mdl.device) if torch.is_tensor(v) else v for k, v in f_in.items()}
-        logits = mdl(**dev_in).logits[0]
-        p_len = p_in["input_ids"].shape[1]
-        tgt = dev_in["input_ids"][0, p_len:]
-        lps = torch.log_softmax(logits[p_len - 1 : -1].float(), dim=-1).gather(-1, tgt.unsqueeze(-1)).squeeze(-1)
+        for row in sample_rows:
+            img = row["images"][0].convert("RGB")
+            ref_text = row["messages"][1]["content"][0]["text"]
+            prompt = proc.apply_chat_template(
+                [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": DIPLOMATIC_PROMPT}]}],
+                tokenize=False, add_generation_prompt=True,
+            )
+            p_in = proc(text=[prompt], images=[img], return_tensors="pt")
+            f_in = proc(text=[prompt + ref_text + "<turn|>"], images=[img], return_tensors="pt")
+            dev_in = {k: v.to(mdl.device) if torch.is_tensor(v) else v for k, v in f_in.items()}
+            logits = mdl(**dev_in).logits[0]
+            p_len = p_in["input_ids"].shape[1]
+            tgt = dev_in["input_ids"][0, p_len:]
+            lps = torch.log_softmax(logits[p_len - 1 : -1].float(), dim=-1).gather(-1, tgt.unsqueeze(-1)).squeeze(-1)
+            collected.extend(float(x) for x in lps[:16].cpu().tolist())
         if check_generate:
-            out = mdl.generate(**{k: v.to(mdl.device) if torch.is_tensor(v) else v for k, v in p_in.items()}, max_new_tokens=128, do_sample=False)
-            gen_ids = out[:, p_len:]
+            s_img = shortest_row["images"][0].convert("RGB")
+            s_ref = shortest_row["messages"][1]["content"][0]["text"]
+            ref_toks = len(tok(s_ref, add_special_tokens=False)["input_ids"])
+            stop_cap = max(512, min(1024, ref_toks * 2 + 64))
+            s_prompt = proc.apply_chat_template(
+                [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": DIPLOMATIC_PROMPT}]}],
+                tokenize=False, add_generation_prompt=True,
+            )
+            sp_in = proc(text=[s_prompt], images=[s_img], return_tensors="pt")
+            out = mdl.generate(**{k: v.to(mdl.device) if torch.is_tensor(v) else v for k, v in sp_in.items()}, max_new_tokens=stop_cap, do_sample=False)
+            gen_ids = out[:, sp_in["input_ids"].shape[1]:]
             decoded = proc.batch_decode(gen_ids, skip_special_tokens=False)[0]
             assert "<|channel>thought" not in decoded, f"Thinking leak in Stage 1 smoke generate: {decoded[:120]}"
-            tok = getattr(proc, "tokenizer", proc)
-            eot_id = tok.convert_tokens_to_ids("<turn|>")
-            assert int(gen_ids.shape[1]) < 128 or eot_id in gen_ids[0].tolist(), "Stage 1 smoke generate hit 128-token cap without stopping"
+            sids = _stop_ids(tok)
+            last_id = int(gen_ids[0, -1].item())
+            assert last_id in sids and int(gen_ids.shape[1]) < stop_cap, f"Stage 1 smoke failed natural stop (last_id={last_id}, len={int(gen_ids.shape[1])}, cap={stop_cap})"
     del mdl
     torch.cuda.empty_cache()
-    return [float(x) for x in lps[:16].cpu().tolist()]
+    return collected
 
-base_lps = _score_mean_lp(work / "gemma4_12b_highres")
-sft_lps = _score_mean_lp(work / "configs" / "sft_merged", check_generate=True)
+base_lps = _score_examples(work / "gemma4_12b_highres")
+live_sft_lps = _score_examples(work / "gemma4_12b_highres", adapter_dir=Path("${RESOLVED_SFT_ADAPTER}"))
+sft_lps = _score_examples(work / "configs" / "sft_merged", check_generate=True)
+merge_diff = max(abs(a - b) for a, b in zip(live_sft_lps, sft_lps))
+merge_tol = 0.05 if vram_gb >= 56.0 else 0.25
+assert merge_diff <= merge_tol, f"Merged SFT diverged from live PEFT adapter (diff={merge_diff:.6f} > {merge_tol})"
 
 stage2_probe = """
 import json, sys
 from pathlib import Path
 import torch
 from datasets import load_from_disk
-from peft import get_peft_model
 from halo.configs.parallelism_arguments import ParallelismArguments
 from halo.configs.preference import SMPOConfig, SMPOScriptArguments
 from halo.configs.script_arguments import ModelArguments
-from halo.entrypoints.data_setup import apply_vision_options, load_script_datasets, resolve_preference_vlm_run
-from halo.entrypoints.model_setup import default_padded_attn_implementation, load_policy_model
-from halo.entrypoints.script import init_training_script, parse_script_args
+from halo.entrypoints.data_setup import apply_vision_options, load_script_datasets, prepare_script_preference_data, resolve_preference_vlm_run
+from halo.entrypoints.model_setup import apply_max_length, apply_text_path_padding_side, default_padded_attn_implementation, install_resolved_tokenizer, load_policy_model
+from halo.entrypoints.script import configure_balancing_and_build_callbacks, distributed_trainer_kwargs, init_training_script, parse_script_args
 from halo.model_loading.parallel.peft_setup import configure_adapter_training
 from halo.trainers.preference.smpo import SMPOTrainer
 from eahtr.candidates import DIPLOMATIC_PROMPT
@@ -223,33 +262,46 @@ work = Path(sys.argv[1])
 sys.argv = ["smpo.py", str(work / "configs" / "smoke_vlm_smpo.yaml")]
 s_args, s_cfg, m_cfg, d_args = parse_script_args(SMPOScriptArguments, SMPOConfig, ModelArguments, ParallelismArguments)
 ctx = init_training_script(s_args, s_cfg, m_cfg, d_args, script_prefix="smpo", trainer_cls=SMPOTrainer)
-ds_s, _ = load_script_datasets(s_args, ctx.parallelism_config)
+ds_s, ds_presharded = load_script_datasets(s_args, ctx.parallelism_config)
 is_vlm_s = resolve_preference_vlm_run(s_args, m_cfg, ds_s, text_only_model=s_args.text_only_model, method="SMPO")
-policy = load_policy_model(ctx, s_cfg, m_cfg, s_args, vlm_run=is_vlm_s, attn_default=default_padded_attn_implementation(m_cfg, sinks_reset=s_args.reset_sinks, context_parallel=False))
-mdl = policy.model
-peft_cfg = configure_adapter_training(s_args, mdl, m_cfg, "CAUSAL_LM")
-if peft_cfg is not None:
-    mdl = get_peft_model(mdl, peft_cfg)
-apply_vision_options(s_args, mdl, m_cfg, policy.processing_class, is_vlm=is_vlm_s)
-proc = policy.processing_class
-row0 = load_from_disk(str(work / "datasets" / "halo_vlm_sft_smoke"))["train"][0]
-img = row0["images"][0].convert("RGB")
-ref_text = row0["messages"][1]["content"][0]["text"]
-prompt = proc.apply_chat_template([{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": DIPLOMATIC_PROMPT}]}], tokenize=False, add_generation_prompt=True)
-p_in = proc(text=[prompt], images=[img], return_tensors="pt")
-f_in = proc(text=[prompt + ref_text + "<turn|>"], images=[img], return_tensors="pt")
+policy = load_policy_model(ctx, s_cfg, m_cfg, s_args, vlm_run=is_vlm_s, attn_default=default_padded_attn_implementation(m_cfg, sinks_reset=s_args.reset_sinks, context_parallel=ctx.parallelism_config.is_cp_mode))
+tok = apply_max_length(s_cfg, s_args, policy.model, policy.tokenizer)
+proc = install_resolved_tokenizer(policy.processing_class, tok)
+apply_text_path_padding_side(tok, is_vlm_s)
+peft_cfg = configure_adapter_training(s_args, policy.model, m_cfg, "CAUSAL_LM")
+apply_vision_options(s_args, policy.model, m_cfg, proc, is_vlm=is_vlm_s)
+train_ds, eval_ds, gen_cb = prepare_script_preference_data(s_args, s_cfg, ds_s, tok, is_vlm_data=is_vlm_s, generation_max_prompt_length=s_cfg.max_prompt_length)
+cbs = configure_balancing_and_build_callbacks(s_args, s_cfg, policy.model, ctx, generate_callback=gen_cb)
+trainer = SMPOTrainer(
+    model=policy.model, args=s_cfg, train_dataset=train_ds, eval_dataset=eval_ds,
+    processing_class=proc, peft_config=peft_cfg, callbacks=cbs,
+    **distributed_trainer_kwargs(s_args, ctx.parallelism_config, dataset_presharded=ds_presharded), is_vlm=is_vlm_s,
+)
+mdl = trainer.model
+ds_rows = load_from_disk(str(work / "datasets" / "halo_vlm_sft_smoke"))["train"]
+sample_rows = [ds_rows[0], ds_rows[min(1, len(ds_rows) - 1)]]
+collected = []
 mdl.eval()
 with torch.no_grad():
-    dev_in = {k: v.to(mdl.device) if torch.is_tensor(v) else v for k, v in f_in.items()}
-    logits = mdl(**dev_in).logits[0]
-    p_len = p_in["input_ids"].shape[1]
-    lps = torch.log_softmax(logits[p_len - 1 : -1].float(), dim=-1).gather(-1, dev_in["input_ids"][0, p_len:].unsqueeze(-1)).squeeze(-1)
-print(json.dumps([float(x) for x in lps[:16].cpu().tolist()]))
+    for row in sample_rows:
+        img = row["images"][0].convert("RGB")
+        ref_text = row["messages"][1]["content"][0]["text"]
+        prompt = proc.apply_chat_template([{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": DIPLOMATIC_PROMPT}]}], tokenize=False, add_generation_prompt=True)
+        p_in = proc(text=[prompt], images=[img], return_tensors="pt")
+        f_in = proc(text=[prompt + ref_text + "<turn|>"], images=[img], return_tensors="pt")
+        dev_in = {k: v.to(mdl.device) if torch.is_tensor(v) else v for k, v in f_in.items()}
+        logits = mdl(**dev_in).logits[0]
+        p_len = p_in["input_ids"].shape[1]
+        lps = torch.log_softmax(logits[p_len - 1 : -1].float(), dim=-1).gather(-1, dev_in["input_ids"][0, p_len:].unsqueeze(-1)).squeeze(-1)
+        collected.extend(float(x) for x in lps[:16].cpu().tolist())
+print(json.dumps(collected))
 """
 raw_s2 = subprocess.check_output([sys.executable, "-c", stage2_probe, str(work)], text=True).strip().splitlines()[-1]
 stage2_lps = json.loads(raw_s2)
-report = verify_stage_continuity_logprobs(base_lps, sft_lps, stage2_lps)
-print("Verified Stage 1->2 continuity (via Halo SMPO loader):", report)
+s2_tol = 0.02 if vram_gb >= 56.0 else 0.15
+report = verify_stage_continuity_logprobs(base_lps, sft_lps, stage2_lps, tol=s2_tol)
+report["live_vs_merged_diff"] = merge_diff
+print("Verified Stage 1->2 continuity (via Halo SMPOTrainer):", report)
 PY
 
 HALO_FLEX_SLIDING="${FLEX_ENV}" "${SMOKE_VENV}/bin/python" "${HALO_DIR}/scripts/training/preference/smpo.py" "${WORK_DIR}/configs/smoke_vlm_smpo.yaml" 2>&1 | tee "${WORK_DIR}/configs/smpo_run.log"

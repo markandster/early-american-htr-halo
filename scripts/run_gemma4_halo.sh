@@ -27,7 +27,8 @@ fi
 STAGED_BASE="${WORK_DIR}/gemma4-${MODEL_SIZE}-highres-1120"
 mkdir -p "${WORK_DIR}"
 python3 "${REPO_ROOT}/scripts/stage_gemma4_highres.py" \
-  --model "${HF_REPO}" --revision "${HF_REV}" --out-dir "${STAGED_BASE}" --max-soft-tokens 1120
+  --model "${HF_REPO}" --revision "${HF_REV}" --out-dir "${STAGED_BASE}" --max-soft-tokens 1120 \
+  --chat-template "${REPO_ROOT}/configs/halo/templates/gemma4_htr_nothink.jinja"
 
 RUN_YAML="${WORK_DIR}/run_${MODEL_SIZE}_${STAGE/smpo/vlm_smpo}.yaml"
 SFT_MERGED_DIR="${SFT_MERGED_DIR:-${DEFAULT_SFT_MERGED}}"
@@ -59,4 +60,4 @@ python3 -c "from pathlib import Path; from eahtr.halo_smoke import verify_halo_r
 RESOLVED_ADAPTER="$(python3 -c "from pathlib import Path; d=Path('${ADAPTER_DIR}'); cands=[d]+[p for p in sorted(d.glob('checkpoint-*'), key=lambda p: int(p.name.split('-')[-1]) if p.name.split('-')[-1].isdigit() else -1, reverse=True) if p.is_dir()]; print(next(str(p) for p in cands if (p/'adapter_model.safetensors').is_file()))")"
 python3 "${HALO_DIR}/scripts/after_training/merge_peft_adapters.py" \
   --adapter_dir "${RESOLVED_ADAPTER}" --output_dir "${MERGED_DIR}"
-python3 "${REPO_ROOT}/scripts/verify_mlx_export.py" "${MERGED_DIR}" --reference-dir "${STAGED_BASE}"
+python3 "${REPO_ROOT}/scripts/verify_mlx_export.py" "${MERGED_DIR}" --reference-dir "${RESOLVED_ADAPTER}"

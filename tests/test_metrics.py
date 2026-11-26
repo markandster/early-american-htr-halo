@@ -78,6 +78,13 @@ def test_line_break_order_tolerant_and_bootstrap_ci() -> None:
     assert reordered["order_tolerant_cer"] == 0.0
     assert reordered["newline_cer"] > 0.0
 
+    merged_breaks = score_line_breaks("First block Second block", "First block\nSecond block")
+    assert merged_breaks["order_tolerant_cer"] == 0.0
+    assert merged_breaks["newline_cer"] > 0.0
+
+    single_line = score_line_breaks("Only one line", "Only one line")
+    assert single_line["line_boundary_f1"] == 1.0
+
     ci = paired_bootstrap_ci(
         [-0.05, -0.04, -0.06, -0.03],
         ["doc1", "doc1", "doc2", "doc3"],

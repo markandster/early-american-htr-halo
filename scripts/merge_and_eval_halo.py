@@ -11,8 +11,8 @@ import sys
 
 from eahtr.candidates import DIPLOMATIC_PROMPT
 from eahtr.halo_export import verify_exported_vlm_dir
-from eahtr.metrics import paired_bootstrap_ci, score_line_breaks, score_pair
-from eahtr.rewards import recommended_max_new_tokens, score_transcription
+from eahtr.metrics import normalize_preserve_newlines, paired_bootstrap_ci, score_line_breaks, score_pair
+from eahtr.rewards import score_transcription
 
 
 def _load_jsonl(path: Path) -> list[dict]:
@@ -100,8 +100,18 @@ def main() -> int:
             raw_ce += rsp.char_edits; raw_cc += rsp.ref_chars
         preds.append({
             "record_id": row["record_id"], "document_id": row["document_id"], "finish_reason": fr,
-            "strict_cer": ver.cer_strict, "reward": ver.reward, "prediction": gen, "reference": row["text"],
+            "strict_cer": ver.cer_strict, "ref_chars": sp.ref_chars, "reward": ver.reward,
+            "prediction": gen, "reference": row["text"],
         })
+
+    if pr_l + rf_l:
+        lb_f1_pct = round(200.0 * tp / (pr_l + rf_l), 2)
+    else:
+        all_nonempty_match = all(
+            bool(normalize_preserve_newlines(p["prediction"])) == bool(normalize_preserve_newlines(p["reference"]))
+            for p in preds
+        )
+        lb_f1_pct = 100.0 if all_nonempty_match else 0.0
 
     scores: dict = {
         "pages": n_rows,
@@ -109,7 +119,7 @@ def main() -> int:
         "strict_wer_pct": round(100.0 * sw / sW, 2) if sW else 0.0,
         "strict_cer_pct": round(100.0 * sc / sC, 2) if sC else 0.0,
         "newline_cer_pct": round(100.0 * nl_e / nl_c, 2) if nl_c else 0.0,
-        "line_boundary_f1_pct": round(200.0 * tp / (pr_l + rf_l), 2) if (pr_l + rf_l) else 0.0,
+        "line_boundary_f1_pct": lb_f1_pct,
         "order_tolerant_cer_pct": round(100.0 * ot_e / ot_c, 2) if ot_c else 0.0,
         "mean_reward": round(sum(p["reward"] for p in preds) / max(1, len(preds)), 4),
         "loop_pages": loops,
@@ -125,12 +135,18 @@ def main() -> int:
         base_data = json.loads(args.baseline_predictions.read_text(encoding="utf-8"))
         base_rows = base_data if isinstance(base_data, list) else base_data.get("predictions", [])
         base_map = {r["record_id"]: r["strict_cer"] for r in base_rows}
-        matched = [p for p in preds if p["record_id"] in base_map]
-        diffs = [p["strict_cer"] - base_map[p["record_id"]] for p in matched]
-        cids = [p["document_id"] for p in matched]
-        wts = [max(1, len(p["reference"])) for p in matched]
-        if diffs:
-            scores["bootstrap_vs_baseline"] = paired_bootstrap_ci(diffs, cids, weights=wts)
+        eval_ids = {p["record_id"] for p in preds}
+        missing_ids = sorted(eval_ids - set(base_map))
+        if missing_ids or len(base_map) != len(eval_ids):
+            print(
+                f"Baseline predictions must match eval record_ids 1-to-1 (missing={len(missing_ids)}, base={len(base_map)}, eval={len(eval_ids)})",
+                file=sys.stderr,
+            )
+            return 2
+        diffs = [p["strict_cer"] - base_map[p["record_id"]] for p in preds]
+        cids = [p["document_id"] for p in preds]
+        wts = [max(1, int(p["ref_chars"])) for p in preds]
+        scores["bootstrap_vs_baseline"] = paired_bootstrap_ci(diffs, cids, weights=wts)
 
     args.out_json.parent.mkdir(parents=True, exist_ok=True)
     args.out_json.write_text(json.dumps({"scores": scores, "predictions": preds}, ensure_ascii=False, indent=2), encoding="utf-8")

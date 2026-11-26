@@ -23,6 +23,7 @@ class _GenerationTagExtension(Extension):
 from eahtr.colab_pipeline import (
     COMPETITION_CANDIDATES,
     CompetitionCandidateSpec,
+    assign_balanced_group_splits,
     assign_deterministic_split,
     assign_revcity_item_groups,
     make_sham_derangement,
@@ -101,6 +102,20 @@ def test_assign_deterministic_split_groups_consistently() -> None:
     splits = {assign_deterministic_split(f"series_{i}") for i in range(200)}
     assert splits == {"train", "val", "test_public"}
 
+    stats = {
+        "giant_diary": {"pages": 194, "institution": "hsp"},
+        **{f"hsp_{i}": {"pages": 12, "institution": "hsp"} for i in range(10)},
+        **{f"aps_{i}": {"pages": 10, "institution": "aps"} for i in range(10)},
+        **{f"lcp_{i}": {"pages": 8, "institution": "lcprevcity"} for i in range(10)},
+    }
+    balanced = assign_balanced_group_splits(stats, val_fraction=0.10, test_fraction=0.10, max_eval_group_pages=40)
+    assert balanced["giant_diary"] == "train"
+    val_groups = [g for g, sp in balanced.items() if sp == "val"]
+    test_groups = [g for g, sp in balanced.items() if sp == "test_public"]
+    assert len(val_groups) >= 3 and len(test_groups) >= 3
+    assert len({stats[g]["institution"] for g in val_groups}) >= 2
+    assert len({stats[g]["institution"] for g in test_groups}) >= 2
+
 
 def test_should_use_4bit_across_gpus_and_arms() -> None:
     g12 = COMPETITION_CANDIDATES["gemma4_12b"]
@@ -177,7 +192,13 @@ def test_generated_notebook_valid_json_ast_and_public_only(tmp_path: Path) -> No
         "exclude_modules=vision_modules",
         "modelopt",
         "SC_PHYS_PAGES",
-        "Missing required",
+        "verify_exported_vlm_dir",
+        "assign_balanced_group_splits",
+        "REVCITY_ZENODO_MD5",
+        "hard_case_held_out",
+        "ROLLOUT_SPLIT",
+        "is_out_of_fold",
+        "image_dhash",
     )
     for marker in expected_markers:
         assert marker in raw_text, f"Missing expected notebook marker: {marker}"

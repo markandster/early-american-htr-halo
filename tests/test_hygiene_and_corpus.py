@@ -72,6 +72,9 @@ def test_parse_alto_xml_lines_extracts_ordered_text() -> None:
     assert parse_alto_xml_lines(alto, sort_regions=True) == ["Head Quarters", "July 1779", "Right Col", "Note"]
     assert detect_two_page_opening(alto) is True
 
+    portrait_alto = alto.replace('WIDTH="2000" HEIGHT="1500"', 'WIDTH="1000" HEIGHT="1500"').replace('WIDTH="2000"', 'WIDTH="1000"')
+    assert detect_two_page_opening(portrait_alto) is False
+
 
 def test_parse_page_xml_lines_extracts_ordered_text() -> None:
     page_xml = """<?xml version="1.0" encoding="UTF-8"?>

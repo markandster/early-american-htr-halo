@@ -22,6 +22,8 @@ DIPLOMATIC_PROMPT = (
 )
 
 REVCITY_ZENODO_URL = "https://zenodo.org/api/records/15776323/files/revcity-htr.zip/content"
+REVCITY_ZENODO_BYTES = 9_988_850_095
+REVCITY_ZENODO_MD5 = "c291f2ebda6e5698f788a06b9520c709"
 LOC_WASHINGTON_ITEM_JSON_URL = "https://www.loc.gov/item/2020446971/?fo=json"
 
 
@@ -162,6 +164,67 @@ def assign_deterministic_split(
     if bucket < test_fraction + val_fraction:
         return "val"
     return "train"
+
+
+def assign_balanced_group_splits(
+    group_stats: Mapping[str, Mapping[str, object]],
+    *,
+    val_fraction: float = 0.10,
+    test_fraction: float = 0.10,
+    max_eval_group_pages: int = 40,
+    seed: int = 20261125,
+) -> dict[str, str]:
+    """Assign size-capped, institution-balanced group splits so one volume never dominates val/test."""
+    if val_fraction < 0 or test_fraction < 0 or val_fraction + test_fraction >= 1.0:
+        raise ValueError("val_fraction + test_fraction must lie in [0, 1)")
+    total_pages = sum(int(meta.get("pages", 0)) for meta in group_stats.values())
+    val_target = max(1, int(round(total_pages * val_fraction))) if val_fraction > 0 else 0
+    test_target = max(1, int(round(total_pages * test_fraction))) if test_fraction > 0 else 0
+
+    assignments: dict[str, str] = {}
+    by_inst: dict[str, list[tuple[str, int]]] = {}
+    for gid, meta in group_stats.items():
+        pages = int(meta.get("pages", 0))
+        if pages > max_eval_group_pages:
+            assignments[gid] = "train"
+        else:
+            inst = str(meta.get("institution") or "unknown")
+            by_inst.setdefault(inst, []).append((gid, pages))
+
+    queues: dict[str, list[tuple[str, int]]] = {}
+    for inst in sorted(by_inst):
+        queues[inst] = sorted(
+            by_inst[inst],
+            key=lambda item: hashlib.sha256(f"{seed}:{item[0]}".encode("utf-8")).hexdigest(),
+        )
+
+    counts = {"val": 0, "test_public": 0}
+    inst_order = sorted(queues)
+    turn = "test_public"
+    progressed = True
+    while progressed and (counts["val"] < val_target or counts["test_public"] < test_target):
+        progressed = False
+        for inst in inst_order:
+            if not queues[inst]:
+                continue
+            gid, pages = queues[inst].pop(0)
+            progressed = True
+            need_test = counts["test_public"] < test_target
+            need_val = counts["val"] < val_target
+            if need_test and (turn == "test_public" or not need_val):
+                assignments[gid] = "test_public"
+                counts["test_public"] += pages
+                turn = "val"
+            elif need_val:
+                assignments[gid] = "val"
+                counts["val"] += pages
+                turn = "test_public"
+            else:
+                assignments[gid] = "train"
+    for inst_q in queues.values():
+        for gid, _ in inst_q:
+            assignments[gid] = "train"
+    return assignments
 
 
 _REVCITY_STEM_RE = re.compile(r"^([A-Za-z]+)(?:%3A|_|:)(\d+)(?:_[A-Za-z0-9]+)?$")

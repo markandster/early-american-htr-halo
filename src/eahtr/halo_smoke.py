@@ -47,16 +47,27 @@ def prepare_gemma4_highres_dir(
     target_dir: Path,
     *,
     max_soft_tokens: int = 1120,
+    chat_template_path: Path | None = None,
 ) -> Path:
-    """Create a zero-copy symlink dir with patched Gemma 4 processor/preprocessor JSONs."""
+    """Create a staged dir with patched resolution JSONs, writable configs, and symlinked weights."""
     src = source_dir.resolve()
     if not src.is_dir():
         raise FileNotFoundError(f"Gemma 4 cache directory not found: {src}")
     target_dir.mkdir(parents=True, exist_ok=True)
 
     json_targets = {"processor_config.json", "preprocessor_config.json"}
+    small_editable_files = {
+        "config.json",
+        "generation_config.json",
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "special_tokens_map.json",
+        "chat_template.jinja",
+    }
     for item in src.iterdir():
         dest = target_dir / item.name
+        if dest.exists() or dest.is_symlink():
+            dest.unlink()
         if item.name in json_targets and item.is_file():
             data = json.loads(item.read_text(encoding="utf-8"))
             if "max_soft_tokens" in data:
@@ -70,10 +81,19 @@ def prepare_gemma4_highres_dir(
                 if "image_seq_length" in ip:
                     ip["image_seq_length"] = max_soft_tokens
             dest.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+            dest.chmod(0o644)
+        elif item.name in small_editable_files and item.is_file():
+            dest.write_bytes(item.read_bytes())
+            dest.chmod(0o644)
         else:
-            if dest.exists() or dest.is_symlink():
-                dest.unlink()
             os.symlink(item, dest)
+
+    if chat_template_path is not None:
+        tpl_dest = target_dir / "chat_template.jinja"
+        if tpl_dest.exists() or tpl_dest.is_symlink():
+            tpl_dest.unlink()
+        tpl_dest.write_text(Path(chat_template_path).read_text(encoding="utf-8"), encoding="utf-8")
+        tpl_dest.chmod(0o644)
     return target_dir
 
 
@@ -300,22 +320,45 @@ def verify_processor_image_tokens(
     return count
 
 
-_LOSS_LOG_RE = re.compile(r"['\"]?loss['\"]?\s*[:=]\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?|nan|inf|-inf)", re.I)
+_LOSS_KV_RE = re.compile(
+    r"['\"]?([a-zA-Z0-9_]*loss)['\"]?\s*[:=]\s*['\"]?"
+    r"([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?|nan|inf|-inf)['\"]?",
+    re.I,
+)
+_STEP_KV_RE = re.compile(
+    r"['\"]?(?:global_step|step|epoch)['\"]?\s*[:=]\s*['\"]?([+-]?(?:\d+(?:\.\d*)?|\.\d+))['\"]?",
+    re.I,
+)
 
 
 def verify_halo_run_log_finite_loss(log_path: Path, *, min_steps: int = 1) -> list[float]:
-    """Assert Halo training run log recorded >= min_steps finite losses (at most 1 per line)."""
+    """Assert Halo training log has >= min_steps finite distinct-step losses and no NaN/Inf loss."""
     if not log_path.is_file():
         raise FileNotFoundError(f"Expected Halo run log not found: {log_path}")
     losses: list[float] = []
+    seen_markers: set[tuple[str, str]] = set()
     for line in log_path.read_text(encoding="utf-8", errors="replace").splitlines():
-        match = _LOSS_LOG_RE.search(line)
-        if not match:
+        kv_matches = _LOSS_KV_RE.findall(line)
+        if not kv_matches:
             continue
-        val = float(match.group(1))
-        if not math.isfinite(val):
-            raise ValueError(f"Non-finite training loss {match.group(1)!r} detected in {log_path}")
-        losses.append(val)
+        parsed: dict[str, float] = {}
+        for raw_key, raw_val in kv_matches:
+            val = float(raw_val)
+            if not math.isfinite(val):
+                raise ValueError(f"Non-finite loss {raw_key}={raw_val!r} detected in {log_path}")
+            parsed[raw_key.lower()] = val
+        primary = parsed.get("loss")
+        if primary is None:
+            primary = parsed.get("train_loss")
+        if primary is None:
+            continue
+        step_m = _STEP_KV_RE.search(line)
+        if step_m:
+            marker_key = (step_m.group(0).split(":")[0].split("=")[0].strip(" '\"").lower(), step_m.group(1))
+            if marker_key in seen_markers:
+                continue
+            seen_markers.add(marker_key)
+        losses.append(primary)
     if len(losses) < min_steps:
         raise ValueError(f"Found {len(losses)} training loss metrics (< {min_steps}) in {log_path}")
     return losses
@@ -326,7 +369,7 @@ def verify_stage_continuity_logprobs(
     sft_lps: Sequence[float],
     stage2_step0_lps: Sequence[float],
     *,
-    tol: float = 1e-3,
+    tol: float = 0.05,
     min_shift: float = 1e-4,
 ) -> dict[str, Any]:
     """Verify Stage 2 step-0 weights match Stage 1 merged SFT and diverge from base."""

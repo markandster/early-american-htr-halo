@@ -77,12 +77,17 @@ if not REPO_DIR.exists():
 else:
     subprocess.run(['git', '-C', str(REPO_DIR), 'pull', '--ff-only'], check=True)
 subprocess.run(['pip', 'install', '-q', '--no-deps', '-e', str(REPO_DIR)], check=True)
+REPO_GIT_SHA = subprocess.check_output(['git', '-C', str(REPO_DIR), 'rev-parse', '--short', 'HEAD'], text=True).strip()
+print(f'Repo commit: {REPO_GIT_SHA} | transformers={transformers.__version__}')
 
 from eahtr.colab_pipeline import (
     COMPETITION_CANDIDATES,
     DIPLOMATIC_PROMPT,
     LOC_WASHINGTON_ITEM_JSON_URL,
+    REVCITY_ZENODO_BYTES,
+    REVCITY_ZENODO_MD5,
     REVCITY_ZENODO_URL,
+    assign_balanced_group_splits,
     assign_deterministic_split,
     assign_revcity_item_groups,
     make_sham_derangement,
@@ -92,6 +97,7 @@ from eahtr.colab_pipeline import (
     validate_competition_candidate,
 )
 from eahtr.corpus import detect_two_page_opening, filter_corpus_record, parse_alto_xml_lines, parse_page_xml_lines
+from eahtr.halo_export import verify_exported_vlm_dir
 from eahtr.hf_dataset import push_splits_to_hf_hub
 from eahtr.hygiene import audit_split_disjointness, clean_diplomatic_target, compute_dhash, extract_word_ngrams
 from eahtr.metrics import normalize_preserve_newlines, normalize_strict, paired_bootstrap_ci, score_line_breaks, score_pair
@@ -140,13 +146,14 @@ SMOKE_TEST_MODE = True
 # Available keys: ['gemma4_12b']
 CANDIDATE_KEYS = ['gemma4_12b']
 ARMS = ['baseline_zeroshot', 'real', 'sham_short']
-SHAM_MAX_PRESENTATIONS = 128 if SMOKE_TEST_MODE else 504
+SHAM_MAX_PRESENTATIONS = 128 if SMOKE_TEST_MODE else None
 
 # Public rights-cleared datasets (CC-BY-4.0 / Public Domain ONLY)
 INCLUDE_REVCITY = True
 REVCITY_MAX_PAGES = 400 if SMOKE_TEST_MODE else None
 VAL_FRACTION = 0.10
 TEST_FRACTION = 0.10
+MAX_EVAL_GROUP_PAGES = 40
 PORTAL_CREATOR_MAP_PATH = ''  # Optional JSON mapping revcity stem/item IDs to creator/hand IDs
 
 # Optional Public Domain LOC By the People (LCCN 2020446971) challenge eval
@@ -175,6 +182,7 @@ HF_DATASET_REPO_ID = 'markandster/early-american-htr-public'
 
 # Offline GRPO rollout generation (Cell 7)
 GENERATE_OFFLINE_GRPO_ROLLOUTS = False
+ROLLOUT_SPLIT = 'val'
 GRPO_ROLLOUT_PROMPTS = 64
 GRPO_NUM_GENERATIONS = 4
 

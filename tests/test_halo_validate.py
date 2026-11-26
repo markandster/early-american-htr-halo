@@ -88,6 +88,7 @@ def test_prepare_gemma4_highres_dir_patches_all_resolution_fields(tmp_path: Path
     src.mkdir()
     (src / "config.json").write_text('{"model_type": "gemma4"}', encoding="utf-8")
     (src / "preprocessor_config.json").write_text('{"max_soft_tokens": 280}', encoding="utf-8")
+    (src / "tokenizer.json").write_text('{"version": "1.0"}', encoding="utf-8")
     (src / "processor_config.json").write_text(
         json.dumps(
             {
@@ -97,9 +98,13 @@ def test_prepare_gemma4_highres_dir_patches_all_resolution_fields(tmp_path: Path
         ),
         encoding="utf-8",
     )
+    tpl_src = tmp_path / "custom.jinja"
+    tpl_src.write_text("{{ '<|turn>model\\n<|channel>thought\\n<channel|>' }}", encoding="utf-8")
 
-    staged = prepare_gemma4_highres_dir(src, tmp_path / "staged", max_soft_tokens=1120)
-    assert (staged / "config.json").is_symlink()
+    staged = prepare_gemma4_highres_dir(src, tmp_path / "staged", max_soft_tokens=1120, chat_template_path=tpl_src)
+    assert not (staged / "config.json").is_symlink() and (staged / "config.json").is_file()
+    assert not (staged / "tokenizer.json").is_symlink() and (staged / "tokenizer.json").is_file()
+    assert (staged / "chat_template.jinja").read_text(encoding="utf-8") == tpl_src.read_text(encoding="utf-8")
     assert json.loads((staged / "preprocessor_config.json").read_text(encoding="utf-8"))["max_soft_tokens"] == 1120
     proc_cfg = json.loads((staged / "processor_config.json").read_text(encoding="utf-8"))
     assert proc_cfg["image_seq_length"] == 1120
@@ -215,10 +220,18 @@ def test_verify_processor_image_tokens_and_run_log_losses(tmp_path: Path, monkey
         verify_processor_image_tokens(_FakeProc(280), img_path)
 
     log_ok = tmp_path / "ok.log"
-    log_ok.write_text("{'loss': 1.42, 'grad_norm': 0.5}\n{'loss': 0.91}\n", encoding="utf-8")
-    assert verify_halo_run_log_finite_loss(log_ok) == [1.42, 0.91]
+    log_ok.write_text("{'loss': '12.47', 'grad_norm': '0.5', 'epoch': '0.2'}\n{'loss': 0.91, 'epoch': '0.4'}\n", encoding="utf-8")
+    assert verify_halo_run_log_finite_loss(log_ok) == [12.47, 0.91]
     with pytest.raises(ValueError, match="< 5"):
         verify_halo_run_log_finite_loss(log_ok, min_steps=5)
+    log_dup_step = tmp_path / "dup_step.log"
+    log_dup_step.write_text(("\n".join(["{'loss': '0.5', 'step': '1'}"] * 5)) + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="Found 1 training loss metrics"):
+        verify_halo_run_log_finite_loss(log_dup_step, min_steps=2)
+    log_eval_nan = tmp_path / "eval_nan.log"
+    log_eval_nan.write_text("{'loss': '0.5', 'eval_loss': 'nan', 'step': '1'}\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="Non-finite loss eval_loss"):
+        verify_halo_run_log_finite_loss(log_eval_nan)
     cont = verify_stage_continuity_logprobs([-2.0, -1.5], [-1.2, -0.9], [-1.2001, -0.9])
     assert cont["max_step0_diff"] <= 1e-3
     with pytest.raises(ValueError, match="diverged from merged SFT"):
@@ -268,15 +281,26 @@ def test_fetch_revcity_smoke_sample_range_and_alto_join(tmp_path: Path, monkeypa
         def read(self, n: int = -1) -> bytes:
             return self._data if n < 0 else self._data[:n]
 
+    import email.message, urllib.error
+
+    req_count = {"n": 0, "did_429": False}
     def _fake_urlopen(req, timeout=60):
+        req_count["n"] += 1
+        if req_count["n"] == 3 and not req_count["did_429"]:
+            req_count["did_429"] = True
+            hdrs = email.message.Message()
+            hdrs["Retry-After"] = "0"
+            raise urllib.error.HTTPError(req.full_url, 429, "Too Many Requests", hdrs, None)
         r = req.headers.get("Range", "bytes=0-0").replace("bytes=", "")
         a, b = (int(x) for x in r.split("-"))
         return _FakeResp(206, zip_bytes[a : b + 1], f"bytes {a}-{b}/{len(zip_bytes)}")
 
     monkeypatch.setattr("eahtr.revcity_range.urllib.request.urlopen", _fake_urlopen)
-    recs = fetch_revcity_smoke_sample("https://example.invalid/revcity.zip", tmp_path / "rc_imgs", max_pages=4)
+    recs = fetch_revcity_smoke_sample("https://example.invalid/revcity.zip", tmp_path / "rc_imgs", max_pages=4, tail_bytes=64)
     assert len(recs) == 1
     assert "Head Quarters Middlebrook" in recs[0]["text"]
+    assert req_count["did_429"] is True
+    assert req_count["n"] <= 6  # coalesced reads avoid 3 separate HTTP calls per member
 
     call_n = {"n": 0}
     def _bad_second_urlopen(req, timeout=60):
@@ -285,7 +309,18 @@ def test_fetch_revcity_smoke_sample_range_and_alto_join(tmp_path: Path, monkeypa
 
     monkeypatch.setattr("eahtr.revcity_range.urllib.request.urlopen", _bad_second_urlopen)
     with pytest.raises(RuntimeError, match="Expected HTTP 206"):
-        fetch_revcity_smoke_sample("https://example.invalid/revcity.zip", tmp_path / "rc_fail", max_pages=4)
+        fetch_revcity_smoke_sample("https://example.invalid/revcity.zip", tmp_path / "rc_fail", max_pages=4, tail_bytes=64)
+
+    def _wrong_offset_urlopen(req, timeout=60):
+        r = req.headers.get("Range", "bytes=0-0").replace("bytes=", "")
+        a, b = (int(x) for x in r.split("-"))
+        if a > 0:
+            return _FakeResp(206, zip_bytes[0 : b - a + 1], f"bytes 0-{b - a}/{len(zip_bytes)}")
+        return _FakeResp(206, zip_bytes[a : b + 1], f"bytes {a}-{b}/{len(zip_bytes)}")
+
+    monkeypatch.setattr("eahtr.revcity_range.urllib.request.urlopen", _wrong_offset_urlopen)
+    with pytest.raises(RuntimeError, match="Content-Range mismatch"):
+        fetch_revcity_smoke_sample("https://example.invalid/revcity.zip", tmp_path / "rc_offset", max_pages=4, tail_bytes=64)
 
 
 def test_halo_export_helpers_and_dir_verifier(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -367,3 +402,128 @@ def test_halo_export_helpers_and_dir_verifier(tmp_path: Path, monkeypatch: pytes
     (ok_dir / "chat_template.jinja").write_text(hub_like_tpl, encoding="utf-8")
     with pytest.raises(ValueError, match="assistant-turn prefix invariance"):
         verify_exported_vlm_dir(ok_dir)
+
+    img_bad_tpl = g4_tpl.replace("<|image|>", "<WRONG_IMG>")
+    (ok_dir / "chat_template.jinja").write_text(img_bad_tpl, encoding="utf-8")
+    ref_dir = tmp_path / "ref_tok"
+    ref_dir.mkdir()
+    (ref_dir / "chat_template.jinja").write_text(g4_tpl, encoding="utf-8")
+    fake_tok_mod = types.ModuleType("transformers")
+    class _FakeTok:
+        eos_token_id = 106
+        def __init__(self, path: str) -> None:
+            self.tpl = (Path(path) / "chat_template.jinja").read_text(encoding="utf-8")
+        def apply_chat_template(self, msgs: object, tokenize: bool = True, add_generation_prompt: bool = False) -> list[int]:
+            rendered = "IMG_TOK" if any(p.get("type") == "image" for m in msgs for p in m.get("content", [])) else "TXT"  # type: ignore[union-attr]
+            if "<WRONG_IMG>" in self.tpl and rendered == "IMG_TOK":
+                return [999]
+            return [1, 2]
+    class _FakeAutoTok:
+        @classmethod
+        def from_pretrained(cls, path: str) -> _FakeTok:
+            return _FakeTok(path)
+    fake_tok_mod.AutoTokenizer = _FakeAutoTok  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "transformers", fake_tok_mod)
+    monkeypatch.setattr("eahtr.halo_validate.sys.version_info", sys.version_info)
+    with pytest.raises(ValueError, match="diverged from"):
+        verify_exported_vlm_dir(ok_dir, reference_dir=ref_dir)
+
+
+def test_merge_and_eval_cli_baseline_match_and_normalized_weighting(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import importlib.util
+
+    repo_root = Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location("merge_and_eval_halo", repo_root / "scripts" / "merge_and_eval_halo.py")
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    mdl_dir = tmp_path / "mdl"
+    mdl_dir.mkdir()
+    (mdl_dir / "processor_config.json").write_text(
+        json.dumps({"image_seq_length": 1120, "image_processor": {"max_soft_tokens": 1120, "image_seq_length": 1120}}),
+        encoding="utf-8",
+    )
+    g4_tpl = (repo_root / "configs" / "halo" / "templates" / "gemma4_htr_nothink.jinja").read_text(encoding="utf-8")
+    (mdl_dir / "chat_template.jinja").write_text(g4_tpl, encoding="utf-8")
+
+    class _FakeImg:
+        def convert(self, mode: str) -> "_FakeImg":
+            return self
+    fake_pil = types.ModuleType("PIL")
+    fake_pil_img = types.ModuleType("PIL.Image")
+    fake_pil_img.open = lambda p: _FakeImg()  # type: ignore[attr-defined]
+    fake_pil.Image = fake_pil_img  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "PIL", fake_pil)
+    monkeypatch.setitem(sys.modules, "PIL.Image", fake_pil_img)
+
+    img_a = tmp_path / "a.png"
+    img_a.write_bytes(b"png")
+    eval_jsonl = tmp_path / "val.jsonl"
+    eval_jsonl.write_text(
+        "\n".join([
+            json.dumps({"record_id": "r1", "document_id": "d1", "split": "val", "image_path": str(img_a), "text": "Dear   Sir"}),
+            json.dumps({"record_id": "r2", "document_id": "d2", "split": "val", "image_path": str(img_a), "text": "Humble"}),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+    bad_base = tmp_path / "bad_base.json"
+    bad_base.write_text(json.dumps([{"record_id": "r1", "strict_cer": 0.5}]), encoding="utf-8")
+
+    class _FakeTensor:
+        def __init__(self, shape: tuple[int, ...]) -> None:
+            self.shape = shape
+        def to(self, dev: object) -> "_FakeTensor":
+            return self
+        def __getitem__(self, sl: object) -> "_FakeTensor":
+            return _FakeTensor((1, 2))
+
+    class _FakeInputs(dict):
+        def to(self, dev: object) -> "_FakeInputs":
+            return self
+
+    class _FakeProc:
+        @classmethod
+        def from_pretrained(cls, *a: object) -> "_FakeProc":
+            return cls()
+        def apply_chat_template(self, msgs: object, **kw: object) -> str:
+            return "P"
+        def __call__(self, text: object, images: object, return_tensors: str = "pt") -> _FakeInputs:
+            return _FakeInputs({"input_ids": _FakeTensor((1, 1))})
+        def batch_decode(self, ids: object, skip_special_tokens: bool = True) -> list[str]:
+            return ["Dear Sir"]
+
+    class _FakeModel:
+        device = "cpu"
+        @classmethod
+        def from_pretrained(cls, *a: object, **kw: object) -> "_FakeModel":
+            return cls()
+        def eval(self) -> None:
+            return None
+        def generate(self, **kw: object) -> _FakeTensor:
+            return _FakeTensor((1, 3))
+
+    fake_tf = types.ModuleType("transformers")
+    fake_tf.AutoProcessor = _FakeProc  # type: ignore[attr-defined]
+    fake_tf.AutoModelForImageTextToText = _FakeModel  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "transformers", fake_tf)
+
+    fake_torch = types.ModuleType("torch")
+    class _NoGrad:
+        def __enter__(self) -> None: return None
+        def __exit__(self, *a: object) -> None: return None
+    fake_torch.bfloat16 = "bf16"  # type: ignore[attr-defined]
+    fake_torch.no_grad = lambda: _NoGrad()  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+    out_json = tmp_path / "out.json"
+    monkeypatch.setattr(sys, "argv", ["merge_and_eval_halo.py", "--model-dir", str(mdl_dir), "--eval-jsonl", str(eval_jsonl), "--out-json", str(out_json), "--baseline-predictions", str(bad_base)])
+    assert mod.main() == 2
+
+    good_base = tmp_path / "good_base.json"
+    good_base.write_text(json.dumps([{"record_id": "r1", "strict_cer": 0.5}, {"record_id": "r2", "strict_cer": 0.5}]), encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", ["merge_and_eval_halo.py", "--model-dir", str(mdl_dir), "--eval-jsonl", str(eval_jsonl), "--out-json", str(out_json), "--baseline-predictions", str(good_base)])
+    assert mod.main() == 0
+    res = json.loads(out_json.read_text(encoding="utf-8"))
+    assert res["scores"]["line_boundary_f1_pct"] == 100.0
+    assert res["predictions"][0]["ref_chars"] == len("Dear Sir")

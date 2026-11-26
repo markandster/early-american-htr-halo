@@ -280,7 +280,7 @@ def verify_exported_vlm_dir(
         env = Environment(loader=BaseLoader(), extensions=[_GenTagExt])
         env.globals["raise_exception"] = lambda msg: (_ for _ in ()).throw(ValueError(msg))
         tpl = env.from_string(tpl_text)
-        msg1 = [{"role": "user", "content": [{"type": "text", "text": "Transcribe."}]}]
+        msg1 = [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": "Transcribe."}]}]
         msg_full = msg1 + [{"role": "assistant", "content": [{"type": "text", "text": "Dear Sir"}]}]
         msg2 = msg_full + [{"role": "user", "content": [{"type": "text", "text": "Next page."}]}]
         r1 = tpl.render(messages=msg1, add_generation_prompt=True, enable_thinking=False, bos_token="", eos_token="", tools=None)
@@ -301,7 +301,7 @@ def verify_exported_vlm_dir(
 
         ref_tok = AutoTokenizer.from_pretrained(str(reference_dir))
         exp_tok = AutoTokenizer.from_pretrained(str(model_dir))
-        sample = [{"role": "user", "content": [{"type": "text", "text": "Transcribe."}]}]
+        sample = [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": "Transcribe."}]}]
         sample_full = sample + [{"role": "assistant", "content": [{"type": "text", "text": "Dear Sir"}]}]
         if ref_tok.eos_token_id != exp_tok.eos_token_id:
             raise ValueError(f"{model_dir}: eos_token_id {exp_tok.eos_token_id} != reference {ref_tok.eos_token_id}")

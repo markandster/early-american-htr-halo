@@ -126,15 +126,27 @@ def detect_two_page_opening(
             break
     if pw and ph and float(ph) > 0 and (float(pw) / float(ph)) >= 1.25:
         return True
-    if pw and float(pw) > 0:
-        centers: list[float] = []
+    if pw and float(pw) > 0 and (not ph or float(pw) / float(ph) >= 1.10):
+        left_cols = 0
+        right_cols = 0
         for blk in root.iter():
-            if _local_tag(blk.tag) == "TextBlock":
-                ok_h, hpos = _float_attr(blk, "HPOS", 0.0)
-                ok_w, b_w = _float_attr(blk, "WIDTH", 0.0)
-                if ok_h:
-                    centers.append((hpos + (b_w * 0.5 if ok_w else 0.0)) / float(pw))
-        if centers and any(c < 0.42 for c in centers) and any(c > 0.58 for c in centers):
+            if _local_tag(blk.tag) != "TextBlock":
+                continue
+            ok_h, hpos = _float_attr(blk, "HPOS", 0.0)
+            ok_w, b_w = _float_attr(blk, "WIDTH", 0.0)
+            if not (ok_h and ok_w and b_w > 0):
+                continue
+            n_lines = sum(1 for el in blk.iter() if _local_tag(el.tag) == "TextLine")
+            if n_lines < 2:
+                continue
+            center = (hpos + b_w * 0.5) / float(pw)
+            right_edge = (hpos + b_w) / float(pw)
+            left_edge = hpos / float(pw)
+            if right_edge <= 0.52 and center < 0.45:
+                left_cols += 1
+            elif left_edge >= 0.48 and center > 0.55:
+                right_cols += 1
+        if left_cols >= 1 and right_cols >= 1:
             return True
     return False
 

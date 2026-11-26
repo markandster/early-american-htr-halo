@@ -24,6 +24,13 @@ def load_processor_fullres(spec_dict: dict):
             ip.max_pixels = max_pixels
     if hasattr(proc, 'image_seq_length'):
         proc.image_seq_length = 1120
+    if 'gemma-4' in hf_repo.lower():
+        tpl_path = REPO_DIR / 'configs' / 'halo' / 'templates' / 'gemma4_htr_nothink.jinja'
+        if tpl_path.is_file():
+            htr_tpl = tpl_path.read_text(encoding='utf-8')
+            proc.chat_template = htr_tpl
+            if hasattr(proc, 'tokenizer') and proc.tokenizer is not None:
+                proc.tokenizer.chat_template = htr_tpl
     return proc
 
 
@@ -109,62 +116,49 @@ def build_training_batch(processor, image: Image.Image, target_text: str, device
 """
 
 CELL_5_ARM_SOURCE = """
-def _build_arm_cache_key(cand_key: str, arm: str, spec, train_rows: list[dict], eval_rows: list[dict]) -> str:
+def _build_arm_cache_key(cand_key: str, arm: str, spec, train_rows: list[dict], eval_rows: list[dict], use_4bit: bool) -> str:
+    tpl_file = REPO_DIR / 'configs' / 'halo' / 'templates' / 'gemma4_htr_nothink.jinja'
+    tpl_sha = hashlib.sha256(tpl_file.read_bytes()).hexdigest()[:12] if tpl_file.is_file() else 'hub'
+    prompt_sha = hashlib.sha256(DIPLOMATIC_PROMPT.encode('utf-8')).hexdigest()[:12]
     payload = {
         'cand': cand_key, 'hf_repo': spec.hf_repo, 'arm': arm, 'smoke': SMOKE_TEST_MODE,
         'ep': EPOCHS, 'r': LORA_RANK, 'lr': LEARNING_RATE, 'vlr': VISION_LR, 'seq': MAX_SEQ_LEN,
         'max_new': MAX_EVAL_NEW_TOKENS, 'seed': SEED, 'freeze_eval': FINAL_FREEZE_EVAL_TEST_PUBLIC,
-        'train_sig': [[r.get('record_id', ''), r.get('image_sha256', '')] for r in train_rows],
-        'eval_sig': [[r.get('record_id', ''), r.get('image_sha256', '')] for r in eval_rows],
+        'use_4bit': use_4bit, 'git_sha': globals().get('REPO_GIT_SHA', 'unknown'), 'tpl': tpl_sha, 'prompt': prompt_sha,
+        'train_sig': [[r.get('record_id', ''), r.get('image_sha256', ''), hashlib.sha256(r.get('text', '').encode()).hexdigest()[:12], r.get('sham_donor_record_id', '')] for r in train_rows],
+        'eval_sig': [[r.get('record_id', ''), r.get('image_sha256', ''), hashlib.sha256(r.get('text', '').encode()).hexdigest()[:12]] for r in eval_rows],
     }
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode('utf-8')).hexdigest()[:16]
 
 
 def run_candidate_arm(cand_key: str, arm: str, arm_train_rows: list[dict], val_slice: list[dict], test_slice: list[dict]) -> dict:
     spec = COMPETITION_CANDIDATES[cand_key]
+    use_4bit = should_use_4bit(spec, VRAM_GB, arm)
     eval_target = test_slice if (FINAL_FREEZE_EVAL_TEST_PUBLIC and test_slice) else val_slice
     eval_split_name = 'public_test' if (FINAL_FREEZE_EVAL_TEST_PUBLIC and test_slice) else 'val'
     out_dir = OUTPUT_ROOT / f'{cand_key}-{arm}'
-    cache_key = _build_arm_cache_key(cand_key, arm, spec, arm_train_rows, eval_target)
+    cache_key = _build_arm_cache_key(cand_key, arm, spec, arm_train_rows, eval_target, use_4bit)
     run_dir = out_dir / cache_key
-    out_dir.mkdir(parents=True, exist_ok=True)
-    run_dir.mkdir(parents=True, exist_ok=True)
+    out_dir.mkdir(parents=True, exist_ok=True); run_dir.mkdir(parents=True, exist_ok=True)
     score_file = out_dir / f'{eval_split_name}_eval_scores_{cache_key}.json'
     if score_file.is_file():
         print(f'[SKIP] Cache hit {cand_key}-{arm} ({cache_key}): {score_file}')
         return json.loads(score_file.read_text(encoding='utf-8'))
 
     print(f'\\n================ {cand_key} ({spec.hf_repo}) | ARM={arm} | EVAL={eval_split_name} ================')
-    spec_dict = {
-        'hf_repo': spec.hf_repo,
-        'max_pixels': spec.max_pixels,
-        'trust_remote_code': spec.trust_remote_code,
-    }
-    processor = load_processor_fullres(spec_dict)
+    processor = load_processor_fullres({'hf_repo': spec.hf_repo, 'max_pixels': spec.max_pixels, 'trust_remote_code': spec.trust_remote_code})
 
-    use_4bit = should_use_4bit(spec, VRAM_GB, arm)
     if use_4bit and spec.quant_method == 'modelopt':
-        raise RuntimeError(
-            f'Candidate {spec.hf_repo} uses {spec.quant_method} quantization and cannot be loaded '
-            'with 4-bit bitsandbytes NF4 QLoRA; run via Halo multi-GPU or choose a BF16 checkpoint.'
-        )
+        raise RuntimeError(f'Candidate {spec.hf_repo} uses {spec.quant_method} quantization; cannot use 4-bit NF4 QLoRA.')
 
-    load_kwargs = {
-        'device_map': 'auto',
-        'torch_dtype': torch.bfloat16,
-        'trust_remote_code': spec.trust_remote_code,
-    }
+    load_kwargs = {'device_map': 'auto', 'torch_dtype': torch.bfloat16, 'trust_remote_code': spec.trust_remote_code}
     if 'gemma-4' in spec.hf_repo.lower():
         load_kwargs['attn_implementation'] = 'sdpa'
     if use_4bit:
-        mode_label = '4-bit NF4 inference' if arm == 'baseline_zeroshot' else '4-bit NF4 QLoRA'
-        print(f'VRAM {VRAM_GB} GB: loading {cand_key} ({arm}) with {mode_label} (BF16 compute + BF16 vision skip)')
+        print(f'VRAM {VRAM_GB} GB: loading {cand_key} ({arm}) in 4-bit NF4 (BF16 compute + BF16 vision skip)')
         load_kwargs['quantization_config'] = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_quant_type='nf4',
-            bnb_4bit_use_double_quant=True,
-            bnb_4bit_compute_dtype=torch.bfloat16,
-            llm_int8_skip_modules=list(spec.vision_trainable_patterns),
+            load_in_4bit=True, bnb_4bit_quant_type='nf4', bnb_4bit_use_double_quant=True,
+            bnb_4bit_compute_dtype=torch.bfloat16, llm_int8_skip_modules=list(spec.vision_trainable_patterns),
         )
 
     model = load_vlm_model(spec.hf_repo, load_kwargs)
@@ -172,18 +166,10 @@ def run_candidate_arm(cand_key: str, arm: str, arm_train_rows: list[dict], val_s
     if arm == 'baseline_zeroshot':
         eval_res = run_eval_panel(model, processor, eval_target, panel_name=f'{cand_key}-zeroshot-{eval_split_name}')
         payload = {
-            'candidate': cand_key,
-            'hf_repo': spec.hf_repo,
-            'arm': arm,
-            'eval_split': eval_split_name,
-            'cache_key': cache_key,
-            'used_4bit': use_4bit,
-            'per_side_cer': [p['strict_cer'] for p in eval_res['predictions']],
-            'scores': eval_res['scores'],
+            'candidate': cand_key, 'hf_repo': spec.hf_repo, 'arm': arm, 'eval_split': eval_split_name,
+            'cache_key': cache_key, 'used_4bit': use_4bit, 'per_side_cer': [p['strict_cer'] for p in eval_res['predictions']], 'scores': eval_res['scores'],
         }
-        (out_dir / f'predictions_{eval_split_name}_{cache_key}.json').write_text(
-            json.dumps(eval_res['predictions'], ensure_ascii=False, indent=2), encoding='utf-8'
-        )
+        (out_dir / f'predictions_{eval_split_name}_{cache_key}.json').write_text(json.dumps(eval_res['predictions'], ensure_ascii=False, indent=2), encoding='utf-8')
         score_file.write_text(json.dumps(payload, indent=2), encoding='utf-8')
         print(f'[ZERO-SHOT {cand_key} | {eval_split_name}]', payload['scores'])
         del model; gc.collect(); torch.cuda.empty_cache()
@@ -367,64 +353,46 @@ def run_candidate_arm(cand_key: str, arm: str, arm_train_rows: list[dict], val_s
         swap_delta = round(swap_eval['scores']['strict_cer_pct'] - matched_sub, 2)
         print(f'Image-swap check ({len(swap_subset)} pages): swap CER={swap_eval["scores"]["strict_cer_pct"]}% (delta={swap_delta:+.2f} pp)')
 
-    merged_dir = run_dir / 'merged_hf'
-    merged_dir_str = None
-    if not use_4bit:
-        merged_model = model.merge_and_unload()
-        merged_model.save_pretrained(merged_dir, safe_serialization=True)
-        processor.save_pretrained(merged_dir)
-        del merged_model
-        _assert_highres_processor_config(merged_dir, spec.hf_repo)
-        merged_dir_str = str(merged_dir)
-    else:
-        del model, optimizer, scheduler
-        gc.collect()
-        torch.cuda.empty_cache()
-        try:
-            host_ram_gb = (os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES')) / (1024 ** 3)
-        except Exception:
-            host_ram_gb = None
-        if host_ram_gb is not None and spec.params_b * 3.0 > host_ram_gb:
-            print(
-                f'[SKIP MERGE] Host RAM {host_ram_gb:.1f} GB < ~{spec.params_b * 3.0:.0f} GB needed for CPU BF16 merge of {spec.hf_repo}; '
-                f'adapter saved at {run_dir / "adapter_best"}. Use Halo merge_peft_adapters.py (without --device_map or --fp32_norms) on a High-RAM/GPU host.'
-            )
-        else:
-            cpu_base = load_vlm_model(
-                spec.hf_repo,
-                {'device_map': 'cpu', 'torch_dtype': torch.bfloat16, 'trust_remote_code': spec.trust_remote_code},
-            )
-            merged_model = PeftModel.from_pretrained(cpu_base, str(run_dir / 'adapter_best')).merge_and_unload()
-            merged_model.save_pretrained(merged_dir, safe_serialization=True)
-            processor.save_pretrained(merged_dir)
-            del merged_model, cpu_base
-            _assert_highres_processor_config(merged_dir, spec.hf_repo)
-            merged_dir_str = str(merged_dir)
-        model = optimizer = scheduler = None
-
     payload = {
-        'candidate': cand_key,
-        'hf_repo': spec.hf_repo,
-        'arm': arm,
-        'eval_split': eval_split_name,
-        'cache_key': cache_key,
-        'train_sides': len(arm_train_rows),
-        'vision_trainable_params': n_vision_trainable,
-        'lora_trainable_params': n_lora_trainable,
-        'image_tokens_per_page': realized_image_tokens,
-        'used_4bit_qlora': use_4bit,
-        'skipped_overlength': skipped_overlength,
-        'discarded_oom_microbatches': discarded_oom_microbatches,
-        'best_epoch': best_epoch,
-        'train_log': train_log,
-        'predictions_sha256': hashlib.sha256(pred_bytes).hexdigest(),
-        'per_side_cer': [p['strict_cer'] for p in final_eval['predictions']],
-        'swap_cer_degradation': swap_delta,
-        'scores': final_eval['scores'],
-        'adapter_dir': str(run_dir / 'adapter_best'),
-        'merged_hf_dir': merged_dir_str,
+        'candidate': cand_key, 'hf_repo': spec.hf_repo, 'arm': arm, 'eval_split': eval_split_name, 'cache_key': cache_key,
+        'train_sides': len(arm_train_rows), 'vision_trainable_params': n_vision_trainable, 'lora_trainable_params': n_lora_trainable,
+        'image_tokens_per_page': realized_image_tokens, 'used_4bit_qlora': use_4bit, 'skipped_overlength': skipped_overlength,
+        'discarded_oom_microbatches': discarded_oom_microbatches, 'best_epoch': best_epoch, 'train_log': train_log,
+        'predictions_sha256': hashlib.sha256(pred_bytes).hexdigest(), 'per_side_cer': [p['strict_cer'] for p in final_eval['predictions']],
+        'swap_cer_degradation': swap_delta, 'scores': final_eval['scores'], 'adapter_dir': str(run_dir / 'adapter_best'), 'merged_hf_dir': None,
     }
     score_file.write_text(json.dumps(payload, indent=2), encoding='utf-8')
+
+    merged_dir = WORK_ROOT / 'merged' / f'{cand_key}-{arm}-{cache_key}'
+    merged_dir.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        if not use_4bit:
+            merged_model = model.merge_and_unload()
+            merged_model.save_pretrained(merged_dir, safe_serialization=True)
+            processor.save_pretrained(merged_dir)
+            del merged_model
+            _assert_highres_processor_config(merged_dir, spec.hf_repo)
+            payload['merged_hf_dir'] = str(merged_dir)
+        else:
+            del model, optimizer, scheduler; gc.collect(); torch.cuda.empty_cache()
+            try:
+                host_ram_gb = (os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES')) / (1024 ** 3)
+            except Exception:
+                host_ram_gb = None
+            if host_ram_gb is not None and spec.params_b * 3.0 > host_ram_gb:
+                print(f'[SKIP MERGE] Host RAM {host_ram_gb:.1f} GB < ~{spec.params_b * 3.0:.0f} GB needed; adapter saved at {run_dir / "adapter_best"}.')
+            else:
+                cpu_base = load_vlm_model(spec.hf_repo, {'device_map': 'cpu', 'torch_dtype': torch.bfloat16, 'trust_remote_code': spec.trust_remote_code})
+                merged_model = PeftModel.from_pretrained(cpu_base, str(run_dir / 'adapter_best')).merge_and_unload()
+                merged_model.save_pretrained(merged_dir, safe_serialization=True)
+                processor.save_pretrained(merged_dir)
+                del merged_model, cpu_base
+                _assert_highres_processor_config(merged_dir, spec.hf_repo)
+                payload['merged_hf_dir'] = str(merged_dir)
+            model = optimizer = scheduler = None
+        score_file.write_text(json.dumps(payload, indent=2), encoding='utf-8')
+    except Exception as merge_exc:
+        print(f'[WARN] Post-eval merge failed (scores & adapter already saved): {merge_exc}')
     print(f'[DONE {cand_key}-{arm} | {eval_split_name}]', payload['scores'])
 
     del model, optimizer, scheduler

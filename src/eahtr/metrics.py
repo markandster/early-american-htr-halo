@@ -115,6 +115,8 @@ def score_line_breaks(prediction: str, reference: str) -> dict[str, float]:
     pred_lines = pred_nl.splitlines() if pred_nl else []
     ref_lines = ref_nl.splitlines() if ref_nl else []
     if not ref_lines:
+        ot_char_edits = 0 if not pred_lines else len(pred_nl)
+        ot_ref_chars = 0
         order_tolerant_cer = 0.0 if not pred_lines else 1.0
     else:
         unused = list(range(len(pred_lines)))
@@ -128,10 +130,11 @@ def score_line_breaks(prediction: str, reference: str) -> dict[str, float]:
             matched_edits += int(Levenshtein.distance(pred_lines[best_i], r_ln))
             unused.remove(best_i)
         matched_edits += sum(len(pred_lines[idx]) for idx in unused)
-        order_tolerant_cer = matched_edits / max(1, total_ref_chars)
+        strict_edits = int(Levenshtein.distance(normalize_strict(prediction), normalize_strict(reference)))
+        ot_char_edits = min(matched_edits, strict_edits)
+        ot_ref_chars = total_ref_chars
+        order_tolerant_cer = ot_char_edits / max(1, ot_ref_chars)
 
-    ot_char_edits = matched_edits if ref_lines else (0 if not pred_lines else len(pred_nl))
-    ot_ref_chars = sum(len(ln) for ln in ref_lines) if ref_lines else 0
     return {
         "newline_cer": round(newline_cer, 6),
         "line_boundary_f1": round(boundary_f1, 6),

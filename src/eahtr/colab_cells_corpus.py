@@ -4,10 +4,30 @@ from __future__ import annotations
 
 CELL_4_CORPUS_SOURCE = """
 # === Step 1: Download, Clean & Split Rights-Cleared Public Datasets ===
-def download_with_retry(url: str, dest: Path, max_attempts: int = 4, min_existing_bytes: int = 1_000_000_000) -> None:
+def _file_md5(path: Path) -> str:
+    h = hashlib.md5()
+    with path.open('rb') as fh:
+        for chunk in iter(lambda: fh.read(4 << 20), b''):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def download_with_retry(
+    url: str,
+    dest: Path,
+    max_attempts: int = 4,
+    min_existing_bytes: int = 1_000_000_000,
+    expected_bytes: int | None = None,
+    expected_md5: str | None = None,
+) -> None:
     if dest.exists() and dest.stat().st_size >= min_existing_bytes:
-        print(f'Reusing cached file: {dest} ({dest.stat().st_size / 1e6:.1f} MB)')
-        return
+        size_ok = expected_bytes is None or dest.stat().st_size == expected_bytes
+        md5_ok = expected_md5 is None or _file_md5(dest) == expected_md5
+        if size_ok and md5_ok:
+            print(f'Reusing verified archive: {dest} ({dest.stat().st_size / 1e6:.1f} MB)')
+            return
+        print(f'Cached archive {dest} failed size/MD5 check; re-downloading...')
+        dest.unlink()
     dest.parent.mkdir(parents=True, exist_ok=True)
     part = dest.with_suffix(dest.suffix + '.part')
     last_err = None
@@ -36,6 +56,10 @@ def download_with_retry(url: str, dest: Path, max_attempts: int = 4, min_existin
                         fh.write(chunk)
                         pbar.update(len(chunk))
             part.replace(dest)
+            if expected_bytes is not None and dest.stat().st_size != expected_bytes:
+                raise RuntimeError(f'Download byte count mismatch for {dest}: {dest.stat().st_size} != {expected_bytes}')
+            if expected_md5 is not None and _file_md5(dest) != expected_md5:
+                raise RuntimeError(f'Download MD5 mismatch for {dest}')
             return
         except (HTTPError, URLError, OSError, TimeoutError) as exc:
             last_err = exc
@@ -72,9 +96,22 @@ def _stratified_smoke_slice(rows_by_split: dict, max_total: int, seed: int) -> d
     }
     budgets['train'] = min(len(rows_by_split['train']), max(1, max_total - budgets['val'] - budgets['test_public']))
     for split, k in budgets.items():
-        pool = list(rows_by_split[split])
-        rng.shuffle(pool)
-        out[split] = pool[:k]
+        by_group = {}
+        for item in rows_by_split[split]:
+            gid = item[6].get('document_id') or item[1]
+            by_group.setdefault(gid, []).append(item)
+        gkeys = list(by_group)
+        rng.shuffle(gkeys)
+        for gk in gkeys:
+            rng.shuffle(by_group[gk])
+        picked = []
+        while len(picked) < k and any(by_group.values()):
+            for gk in gkeys:
+                if by_group[gk]:
+                    picked.append(by_group[gk].pop())
+                    if len(picked) >= k:
+                        break
+        out[split] = picked
     return out
 
 
@@ -91,7 +128,13 @@ if INCLUDE_REVCITY:
     rc_zip = rc_dir / 'revcity-htr.zip'
     rc_pages = rc_dir / 'pages'
     rc_pages.mkdir(parents=True, exist_ok=True)
-    download_with_retry(REVCITY_ZENODO_URL, rc_zip, min_existing_bytes=1_000_000_000)
+    download_with_retry(
+        REVCITY_ZENODO_URL,
+        rc_zip,
+        min_existing_bytes=1_000_000_000,
+        expected_bytes=REVCITY_ZENODO_BYTES,
+        expected_md5=REVCITY_ZENODO_MD5,
+    )
 
     with zipfile.ZipFile(rc_zip) as zf:
         by_stem = {}
@@ -128,12 +171,15 @@ if INCLUDE_REVCITY:
                 hc_img = rc_pages / f'hard_{safe_id}{img_ext}'
                 if not hc_img.exists():
                     hc_img.write_bytes(zf.read(entry['img']))
+                is_blank = (len(cleaned_text.strip()) == 0 and len(raw_text.strip()) == 0)
                 hard_case_rows.append({
                     'record_id': f'revcity-{safe_id}',
                     'document_id': info.get('document_id') or f'revcity:{safe_id}',
                     'writer_key': info.get('writer_key') or f'unattributed_item:{safe_id}',
                     'image_path': str(hc_img),
                     'reason': drop_tag,
+                    'is_blank_page': is_blank,
+                    'ground_truth_status': 'blank_page' if is_blank else ('empty_after_hygiene' if not cleaned_text.strip() else 'nonblank'),
                     'raw_text': raw_text,
                     'text': cleaned_text or raw_text,
                 })
@@ -164,11 +210,21 @@ if INCLUDE_REVCITY:
                 else:
                     seen_sig[sig] = b_key
 
+        group_stats = {}
+        for _, _, _, _, _, _, info, b_key in admitted_items:
+            root_g = _uf_find(b_key)
+            ent = group_stats.setdefault(root_g, {'pages': 0, 'institution': info.get('institution') or 'revcity'})
+            ent['pages'] += 1
+        split_map = assign_balanced_group_splits(
+            group_stats,
+            val_fraction=VAL_FRACTION,
+            test_fraction=TEST_FRACTION,
+            max_eval_group_pages=MAX_EVAL_GROUP_PAGES,
+            seed=SEED,
+        )
         split_buckets = {'train': [], 'val': [], 'test_public': []}
         for stem, safe_id, img_m, xml_str, raw_text, cleaned_text, info, base_key in admitted_items:
-            split = assign_deterministic_split(
-                f'revcity:{_uf_find(base_key)}', val_fraction=VAL_FRACTION, test_fraction=TEST_FRACTION
-            )
+            split = split_map[_uf_find(base_key)]
             split_buckets[split].append((stem, safe_id, img_m, xml_str, raw_text, cleaned_text, info))
 
         if REVCITY_MAX_PAGES is not None:
@@ -284,9 +340,23 @@ assert val_audit['passed'], f'Train/Val leakage detected: {val_audit}'
 assert test_audit['passed'], f'Train/Test leakage detected: {test_audit}'
 assert val_test_audit['passed'], f'Val/Test leakage detected: {val_test_audit}'
 
+train_doc_ids = {r['document_id'] for r in train_rows}
+hard_case_held_out = []
+for hc in hard_case_rows:
+    in_train = hc.get('document_id') in train_doc_ids
+    hc['panel_role'] = 'diagnostic_overlaps_train' if in_train else 'held_out_from_train'
+    if not in_train:
+        hard_case_held_out.append(hc)
+
 manifest_dir = OUTPUT_ROOT / 'manifests'
 manifest_dir.mkdir(parents=True, exist_ok=True)
-for split_name, rows in {**all_records_by_split, 'hard_case_panel': hard_case_rows, 'challenge_loc': loc_challenge_rows}.items():
+all_manifests = {
+    **all_records_by_split,
+    'hard_case_panel': hard_case_rows,
+    'hard_case_held_out': hard_case_held_out,
+    'challenge_loc': loc_challenge_rows,
+}
+for split_name, rows in all_manifests.items():
     (manifest_dir / f'{split_name}.jsonl').write_text(
         '\\n'.join(json.dumps(r, ensure_ascii=False) for r in rows) + ('\\n' if rows else ''),
         encoding='utf-8',

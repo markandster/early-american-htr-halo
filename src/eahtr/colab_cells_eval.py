@@ -38,7 +38,10 @@ def score_predictions_verifiable(
 
     assert sw == sum(Levenshtein.distance(normalize_strict(r).split(), normalize_strict(p).split()) for r, p in zip(refs, preds))
     assert sc == sum(Levenshtein.distance(normalize_strict(r), normalize_strict(p)) for r, p in zip(refs, preds))
-    lb_f1 = (2.0 * lb_tp / (lb_p + lb_r)) if (lb_p + lb_r) else 0.0
+    if lb_p + lb_r:
+        lb_f1 = (2.0 * lb_tp) / (lb_p + lb_r)
+    else:
+        lb_f1 = 1.0 if all(bool(normalize_preserve_newlines(p)) == bool(normalize_preserve_newlines(r)) for r, p in zip(refs, preds)) else 0.0
     out = {
         'strict_word_edits': sw,
         'strict_words': sW,
@@ -125,32 +128,21 @@ def run_eval_panel(
 
 
 def _assert_highres_processor_config(model_dir: Path, hf_repo: str) -> None:
-    jinja_path = model_dir / 'chat_template.jinja'
-    tok_cfg_path = model_dir / 'tokenizer_config.json'
-    tpl = jinja_path.read_text(encoding='utf-8') if jinja_path.is_file() else ''
-    if not tpl.strip() and tok_cfg_path.is_file():
-        tok_cfg = json.loads(tok_cfg_path.read_text(encoding='utf-8'))
-        raw = tok_cfg.get('chat_template')
-        tpl = raw if isinstance(raw, str) else ''
-    assert tpl.strip(), f'{model_dir}: missing non-empty chat_template in merged export'
-    assert 'else 0.9' not in tpl, f'{model_dir}: Inkling template defaults to 0.9 thinking effort'
-    if 'gemma-4' not in hf_repo.lower():
-        return
-    cfg_path = model_dir / 'processor_config.json'
-    assert cfg_path.is_file(), f'Missing required {cfg_path} in merged Gemma 4 export'
-    data = json.loads(cfg_path.read_text(encoding='utf-8'))
-    assert data.get('image_seq_length') == 1120, f'{cfg_path}: expected image_seq_length==1120'
-    ip = data.get('image_processor', {})
-    assert ip.get('max_soft_tokens') == 1120, f'{cfg_path}: expected max_soft_tokens==1120'
-    if 'image_seq_length' in ip:
-        assert ip['image_seq_length'] == 1120, f'{cfg_path}: expected image_processor.image_seq_length==1120'
+    family = 'gemma4' if 'gemma-4' in hf_repo.lower() else 'inkling2'
+    verify_exported_vlm_dir(
+        model_dir,
+        expected_soft_tokens=1120,
+        check_gemma4_resolution=(family == 'gemma4'),
+        check_nothink_template=True,
+        model_family=family,
+    )
 
 """
 
 CELL_6_RUN_SOURCE = """
 # === Step 3: Dev Validation Only (test_public stays frozen until final eval) ===
 val_slice = val_rows[:VAL_EVAL_MAX_PAGES] if VAL_EVAL_MAX_PAGES else val_rows
-pilot_train_rows = train_rows[:SHAM_MAX_PRESENTATIONS]
+pilot_train_rows = train_rows if SHAM_MAX_PRESENTATIONS is None else train_rows[:SHAM_MAX_PRESENTATIONS]
 sham_rows = make_sham_derangement(pilot_train_rows, seed=SEED)
 dev_test_slice = test_public_rows if FINAL_FREEZE_EVAL_TEST_PUBLIC else []
 eval_slice = dev_test_slice if (FINAL_FREEZE_EVAL_TEST_PUBLIC and dev_test_slice) else val_slice
@@ -226,7 +218,10 @@ if GENERATE_OFFLINE_GRPO_ROLLOUTS:
     model.eval()
 
     ROLLOUT_TEMPS = (0.3, 0.7, 0.7, 1.0)
-    rollout_rows = train_rows[:GRPO_ROLLOUT_PROMPTS]
+    if ROLLOUT_SPLIT == 'train':
+        print('[WARN] ROLLOUT_SPLIT=train draws Stage-2 rollouts from training pages; prefer out-of-fold / val rows.')
+    rollout_pool = all_records_by_split.get(ROLLOUT_SPLIT, val_rows)
+    rollout_rows = rollout_pool[:GRPO_ROLLOUT_PROMPTS]
     out_jsonl = OUTPUT_ROOT / f'{cand_key}_scored_offline_grpo_rollouts.jsonl'
     pref_jsonl = OUTPUT_ROOT / f'{cand_key}_vlm_preferences.jsonl'
     pref_records = []
@@ -265,13 +260,15 @@ if GENERATE_OFFLINE_GRPO_ROLLOUTS:
                 'document_id': row['document_id'],
                 'writer_key': row['writer_key'],
                 'image_sha256': row['image_sha256'],
+                'image_dhash': row.get('image_dhash', ''),
                 'image_path': row['image_path'],
                 'prompt': DIPLOMATIC_PROMPT,
                 'text': row['text'],
                 'completions': completions,
                 'finish_reasons': finish_reasons,
                 'max_new_tokens_cap': cap,
-                'split': 'train',
+                'split': row.get('split', ROLLOUT_SPLIT),
+                'is_out_of_fold': (ROLLOUT_SPLIT != 'train'),
                 'source_checkpoint': str(merged_dir if merged_dir.is_dir() else adapter_dir),
             })
 
