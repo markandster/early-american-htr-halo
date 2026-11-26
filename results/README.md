@@ -10,7 +10,7 @@ Every reported evaluation records:
 
 ## Leaderboard & Ablation Tracker
 
-| Model | Stage / Arm | Split Scope | Strict WER / CER | Newline F1 / Order-Tol CER | Swap Δ / 95% CI | Loop / Cap Pages | Mean Reward | Apple Silicon 24 GB MLX | Notes |
+| Model | Stage / Arm | Split Scope | Strict WER / CER | Newline F1 / Order-Tol CER | Swap Δ / 95% CI | Loop / Cap Pages | Mean Reward | Local MLX (`<= 24 GB`) | Notes |
 |---|---|---|---|---|---|---|---|---|---|
 | `google/gemma-4-12B-it` | Zero-shot baseline (cleaned + raw) | `revcity-val` / frozen `test_public` | _pending_ | _pending_ | — | _pending_ | _pending_ | — | Primary track; 1120 soft tokens, `sdpa`, dual-convention |
 | `google/gemma-4-12B-it` | Matched-compute sham | `revcity-val` / frozen `test_public` | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | — | Proves image-conditioned learning vs optimization budget |

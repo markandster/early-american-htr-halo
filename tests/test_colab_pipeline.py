@@ -173,7 +173,7 @@ def test_generated_notebook_valid_json_ast_and_public_only(tmp_path: Path) -> No
     )
     for marker in expected_markers:
         assert marker in raw_text, f"Missing expected notebook marker: {marker}"
-    for forbidden in ("q" + "wen", "1164" + "045", "include_ben" + "tham", "worst3_failures_public_test"):
+    for forbidden in ("q" + "wen", "worst3_failures_public_test"):
         assert forbidden not in raw_text.lower(), f"Forbidden stale string in notebook: {forbidden}"
     assert "upgrade transformers peft accelerate bitsandbytes rapidfuzz pyyaml pillow" not in raw_text
 

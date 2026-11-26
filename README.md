@@ -3,7 +3,7 @@
 [![CI](https://github.com/markandster/early-american-htr-halo/actions/workflows/ci.yml/badge.svg)](https://github.com/markandster/early-american-htr-halo/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
-Standalone **Apache-2.0** post-training toolkit, corpus hygiene pipeline, two-tier config validator, and verifiable archival preference/reward framework for **writer/document-disjoint 18th-century American diplomatic handwriting recognition** (c. 1750–1800 English round hand), designed for [White Circle Halo](https://github.com/whitecircle/halo) (`v1.3.0rc2`) and local Apple Silicon (`<= 24 GB` / `36 GB` MLX for `12B`) inference.
+Standalone **Apache-2.0** post-training toolkit, corpus hygiene pipeline, two-tier config validator, and verifiable archival preference/reward framework for **writer/document-disjoint 18th-century American diplomatic handwriting recognition** (c. 1750–1800 English round hand), designed for [White Circle Halo](https://github.com/whitecircle/halo) (`v1.3.0rc2`) and optional local quantized (MLX) workstation inference.
 
 ---
 
@@ -55,7 +55,7 @@ All splits are gated by `eahtr.hygiene.audit_split_disjointness` across `documen
 
 ## Target Apache-2.0 Base Models
 
-| Priority | Model | Role & Architecture | Local Target (`24 GB` Apple Silicon MLX) | HF Access / License |
+| Priority | Model | Role & Architecture | Optional Local Quantized Target (`<= 24 GB` MLX) | HF Access / License |
 |---|---|---|---|---|
 | **Primary (1)** | `google/gemma-4-12B-it` | 12B dense unified VLM (`gemma4_unified`, `1120` soft tokens; Stage 1 SFT → conditional Stage 2 SMPO) | 8-bit MLX (`<= 12.5 GiB`) | Ungated / Apache-2.0 (`rev 43c9d014b231`) |
 | **Deferred (1B)** | `google/gemma-4-26B-A4B-it` | 26B / 4B-active MoE VLM (`gemma4`, `EP=8`, deferred behind `12B` validation) | Excluded from 24 GB MLX gate | Ungated / Apache-2.0 (`rev 4d7ae4984b7d`) |

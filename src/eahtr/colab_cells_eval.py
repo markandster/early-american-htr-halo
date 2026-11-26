@@ -278,7 +278,7 @@ if GENERATE_OFFLINE_GRPO_ROLLOUTS:
 """
 
 CELL_8_MLX_SOURCE = """
-# === Apple Silicon (M3 Max <= 24 GB) MLX Gate — Primary 12B Model Only ===
+# === Optional Local Quantized MLX Export (<= 24 GB Workstation Budget — 12B Only) ===
 for cand_key in CANDIDATE_KEYS:
     spec = COMPETITION_CANDIDATES[cand_key]
     merged = ALL_RESULTS.get(cand_key, {}).get('real', {}).get('merged_hf_dir') or f'<merged_{cand_key}_hf_dir>'
@@ -307,5 +307,5 @@ def build_cell_7_rollouts() -> str:
 
 
 def build_cell_8_mlx() -> str:
-    """Return Cell 8 Apple Silicon MLX conversion command generator."""
+    """Return Cell 8 optional local quantized MLX export command generator."""
     return CELL_8_MLX_SOURCE
