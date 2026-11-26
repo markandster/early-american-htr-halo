@@ -4,119 +4,14 @@ from __future__ import annotations
 
 CELL_4_CORPUS_SOURCE = """
 # === Step 1: Download, Clean & Split Rights-Cleared Public Datasets ===
-def _file_md5(path: Path) -> str:
-    h = hashlib.md5()
-    with path.open('rb') as fh:
-        for chunk in iter(lambda: fh.read(4 << 20), b''):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def download_with_retry(
-    url: str,
-    dest: Path,
-    max_attempts: int = 4,
-    min_existing_bytes: int = 1_000_000_000,
-    expected_bytes: int | None = None,
-    expected_md5: str | None = None,
-) -> None:
-    if dest.exists() and dest.stat().st_size >= min_existing_bytes:
-        size_ok = expected_bytes is None or dest.stat().st_size == expected_bytes
-        md5_ok = expected_md5 is None or _file_md5(dest) == expected_md5
-        if size_ok and md5_ok:
-            print(f'Reusing verified archive: {dest} ({dest.stat().st_size / 1e6:.1f} MB)')
-            return
-        print(f'Cached archive {dest} failed size/MD5 check; re-downloading...')
-        dest.unlink()
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    part = dest.with_suffix(dest.suffix + '.part')
-    last_err = None
-    for attempt in range(1, max_attempts + 1):
-        try:
-            existing = part.stat().st_size if part.exists() else 0
-            headers = {'User-Agent': 'early-american-htr-halo/0.1 (public-corpus-research)'}
-            if existing > 0:
-                headers['Range'] = f'bytes={existing}-'
-            req = Request(url, headers=headers)
-            with urlopen(req, timeout=120) as resp:
-                status = getattr(resp, 'status', 200)
-                mode = 'ab' if (existing > 0 and status == 206) else 'wb'
-                total = int(resp.headers.get('Content-Length') or 0) + (existing if mode == 'ab' else 0)
-                with part.open(mode) as fh, tqdm(
-                    total=total or None,
-                    initial=existing if mode == 'ab' else 0,
-                    unit='B',
-                    unit_scale=True,
-                    desc=dest.name,
-                ) as pbar:
-                    while True:
-                        chunk = resp.read(4 << 20)
-                        if not chunk:
-                            break
-                        fh.write(chunk)
-                        pbar.update(len(chunk))
-            part.replace(dest)
-            if expected_bytes is not None and dest.stat().st_size != expected_bytes:
-                actual = dest.stat().st_size
-                dest.unlink(missing_ok=True)
-                raise OSError(f'Download byte count mismatch for {dest}: {actual} != {expected_bytes}')
-            if expected_md5 is not None and _file_md5(dest) != expected_md5:
-                dest.unlink(missing_ok=True)
-                raise OSError(f'Download MD5 mismatch for {dest}')
-            return
-        except (HTTPError, URLError, OSError, TimeoutError) as exc:
-            last_err = exc
-            wait_s = min(60, 5 * attempt)
-            print(f'[Attempt {attempt}/{max_attempts}] Download error ({type(exc).__name__}: {exc}); retrying in {wait_s}s...')
-            time.sleep(wait_s)
-    raise RuntimeError(f'Failed to download {url}: {last_err}')
-
-
-def fetch_bytes_polite(url: str, max_attempts: int = 3, delay_s: float = 0.5) -> bytes:
-    last_err = None
-    for attempt in range(1, max_attempts + 1):
-        try:
-            time.sleep(delay_s)
-            req = Request(url, headers={'User-Agent': 'early-american-htr-halo/0.1 (public-corpus-research)'})
-            with urlopen(req, timeout=60) as resp:
-                return resp.read()
-        except (HTTPError, URLError, OSError, TimeoutError) as exc:
-            last_err = exc
-            time.sleep(min(30, 3 * attempt))
-    raise RuntimeError(f'Failed GET {url}: {last_err}')
-
-
-def _stratified_smoke_slice(rows_by_split: dict, max_total: int, seed: int) -> dict:
-    total = sum(len(v) for v in rows_by_split.values())
-    if total <= max_total:
-        return rows_by_split
-    rng = random.Random(seed)
-    out = {'train': [], 'val': [], 'test_public': []}
-    min_eval = min(24, max(8, max_total // 10))
-    budgets = {
-        'val': min(len(rows_by_split['val']), max(min_eval, int(max_total * VAL_FRACTION))),
-        'test_public': min(len(rows_by_split['test_public']), max(min_eval, int(max_total * TEST_FRACTION))),
-    }
-    budgets['train'] = min(len(rows_by_split['train']), max(1, max_total - budgets['val'] - budgets['test_public']))
-    for split, k in budgets.items():
-        by_group = {}
-        for item in rows_by_split[split]:
-            gid = item[6].get('document_id') or item[1]
-            by_group.setdefault(gid, []).append(item)
-        gkeys = list(by_group)
-        rng.shuffle(gkeys)
-        for gk in gkeys:
-            rng.shuffle(by_group[gk])
-        picked = []
-        while len(picked) < k and any(by_group.values()):
-            for gk in gkeys:
-                if by_group[gk]:
-                    picked.append(by_group[gk].pop())
-                    if len(picked) >= k:
-                        break
-        out[split] = picked
-    return out
-
+from eahtr.revcity_build import (
+    build_revcity_manifests,
+    download_with_retry,
+    fetch_bytes_polite,
+    split_summary_stats,
+    tag_hard_case_overlaps,
+    write_jsonl_atomic,
+)
 
 all_records_by_split = {'train': [], 'val': [], 'test_public': []}
 hard_case_rows = []
@@ -126,144 +21,40 @@ creator_map = {}
 if PORTAL_CREATOR_MAP_PATH and Path(PORTAL_CREATOR_MAP_PATH).is_file():
     creator_map = json.loads(Path(PORTAL_CREATOR_MAP_PATH).read_text(encoding='utf-8'))
 
+manifest_dir = OUTPUT_ROOT / 'manifests'
+manifest_dir.mkdir(parents=True, exist_ok=True)
+val_audit = {'passed': True, 'perceptual_image_collisions': []}
+test_audit = {'passed': True, 'perceptual_image_collisions': []}
+val_test_audit = {'passed': True, 'perceptual_image_collisions': []}
+
 if INCLUDE_REVCITY:
     rc_dir = WORK_ROOT / 'revcity'
     rc_zip = rc_dir / 'revcity-htr.zip'
     rc_pages = rc_dir / 'pages'
-    rc_pages.mkdir(parents=True, exist_ok=True)
-    download_with_retry(
-        REVCITY_ZENODO_URL,
+    rc_summary = build_revcity_manifests(
         rc_zip,
-        min_existing_bytes=1_000_000_000,
+        rc_pages,
+        manifest_dir,
+        max_id_gap=30,
+        val_fraction=VAL_FRACTION,
+        test_fraction=TEST_FRACTION,
+        max_eval_group_pages=MAX_EVAL_GROUP_PAGES,
+        seed=SEED,
+        max_pages=REVCITY_MAX_PAGES,
+        creator_map=creator_map or None,
+        path_mode='absolute',
+        download_url=REVCITY_ZENODO_URL,
         expected_bytes=REVCITY_ZENODO_BYTES,
         expected_md5=REVCITY_ZENODO_MD5,
+        write_outputs=False,
     )
-
-    with zipfile.ZipFile(rc_zip) as zf:
-        by_stem = {}
-        for member in zf.namelist():
-            low = member.lower()
-            stem = Path(member).stem
-            if low.endswith(('.jpg', '.jpeg', '.png')):
-                by_stem.setdefault(stem, {})['img'] = member
-            elif low.endswith('.xml'):
-                by_stem.setdefault(stem, {})['xml'] = member
-        paired_stems = sorted(s for s, d in by_stem.items() if 'img' in d and 'xml' in d)
-        print(f'Scanning all {len(paired_stems)} paired (JPG/PNG + ALTO-XML) pages in Zenodo 15776323 (CC-BY-4.0)')
-
-        # Assign volume/item groups (max_id_gap=30) & merge exact/n-gram linked keys before splitting
-        item_groups = assign_revcity_item_groups(paired_stems, max_id_gap=30, creator_map=creator_map or None)
-        admitted_items = []
-        for stem in paired_stems:
-            entry = by_stem[stem]
-            xml_str = zf.read(entry['xml']).decode('utf-8', errors='replace')
-            try:
-                lines = parse_alto_xml_lines(xml_str, sort_regions=False)
-            except Exception:
-                corpus_report['revcity_xml_parse_error'] += 1
-                continue
-            raw_text = '\\n'.join(lines)
-            accepted, reason = filter_corpus_record({'source_name': 'Revolutionary City', 'license': 'CC-BY-4.0', 'text': raw_text})
-            cleaned_text = clean_diplomatic_target(raw_text)
-            info = item_groups.get(stem, {})
-            safe_id = info.get('safe_id') or stem.replace('%3A', '_')
-            if not accepted or len(cleaned_text.split()) < 8:
-                drop_tag = reason if not accepted else 'dropped_under_8_words'
-                corpus_report[f'revcity_{drop_tag}'] += 1
-                img_ext = Path(entry['img']).suffix.lower()
-                hc_img = rc_pages / f'hard_{safe_id}{img_ext}'
-                if not hc_img.exists():
-                    hc_img.write_bytes(zf.read(entry['img']))
-                has_empty_alto = (len(raw_text.strip()) == 0)
-                gt_status = 'missing_or_unverified_gt' if has_empty_alto else ('empty_after_hygiene' if not cleaned_text.strip() else 'nonblank')
-                hard_case_rows.append({
-                    'record_id': f'revcity-{safe_id}',
-                    'document_id': info.get('document_id') or f'revcity:{safe_id}',
-                    'writer_key': info.get('writer_key') or f'unattributed_item:{safe_id}',
-                    'image_path': str(hc_img),
-                    'reason': drop_tag,
-                    'has_empty_alto_text': has_empty_alto,
-                    'ground_truth_status': gt_status,
-                    'raw_text': raw_text,
-                    'text': cleaned_text or raw_text,
-                })
-                continue
-            base_key = info['writer_key'] if info.get('hand_attributed') == 'true' else (info.get('document_id') or f'revcity:{safe_id}')
-            admitted_items.append((stem, safe_id, entry['img'], xml_str, raw_text, cleaned_text, info, base_key))
-
-        # Union-find transitive closure across 32-gram & >=8-word exact-text matches so related docs never straddle splits
-        uf_parent = {it[7]: it[7] for it in admitted_items}
-        def _uf_find(k):
-            while uf_parent[k] != k:
-                uf_parent[k] = uf_parent[uf_parent[k]]
-                k = uf_parent[k]
-            return k
-        def _uf_union(a, b):
-            ra, rb = _uf_find(a), _uf_find(b)
-            if ra != rb:
-                uf_parent[max(ra, rb)] = min(ra, rb)
-        seen_sig = {}
-        for _, _, _, _, _, c_txt, _, b_key in admitted_items:
-            sigs = set(extract_word_ngrams(c_txt, n=32))
-            words_norm = ' '.join(c_txt.lower().split())
-            if len(words_norm.split()) >= 8:
-                sigs.add('exact:' + hashlib.sha256(words_norm.encode('utf-8')).hexdigest())
-            for sig in sigs:
-                if sig in seen_sig:
-                    _uf_union(seen_sig[sig], b_key)
-                else:
-                    seen_sig[sig] = b_key
-
-        group_stats = {}
-        for _, _, _, _, _, _, info, b_key in admitted_items:
-            root_g = _uf_find(b_key)
-            ent = group_stats.setdefault(root_g, {'pages': 0, 'institution': info.get('institution') or 'revcity'})
-            ent['pages'] += 1
-        split_map = assign_balanced_group_splits(
-            group_stats,
-            val_fraction=VAL_FRACTION,
-            test_fraction=TEST_FRACTION,
-            max_eval_group_pages=MAX_EVAL_GROUP_PAGES,
-            seed=SEED,
-        )
-        split_buckets = {'train': [], 'val': [], 'test_public': []}
-        for stem, safe_id, img_m, xml_str, raw_text, cleaned_text, info, base_key in admitted_items:
-            split = split_map[_uf_find(base_key)]
-            split_buckets[split].append((stem, safe_id, img_m, xml_str, raw_text, cleaned_text, info))
-
-        if REVCITY_MAX_PAGES is not None:
-            split_buckets = _stratified_smoke_slice(split_buckets, REVCITY_MAX_PAGES, SEED)
-
-        for split, items in split_buckets.items():
-            for stem, safe_id, img_member, xml_str, raw_text, cleaned_text, info in tqdm(
-                items, desc=f'Extract RevCity {split}'
-            ):
-                img_ext = Path(img_member).suffix.lower()
-                img_bytes = zf.read(img_member)
-                img_sha = hashlib.sha256(img_bytes).hexdigest()
-                img_out = rc_pages / f'{safe_id}{img_ext}'
-                if not img_out.exists():
-                    img_out.write_bytes(img_bytes)
-                dhash_hex = compute_dhash(img_out)
-                all_records_by_split[split].append({
-                    'record_id': f'revcity-{safe_id}',
-                    'collection': 'revcity-zenodo-15776323',
-                    'document_id': info.get('document_id') or f'revcity:{safe_id}',
-                    'writer_key': info.get('writer_key') or f'unattributed_item:{safe_id}',
-                    'writer_attributed': info.get('hand_attributed') == 'true',
-                    'is_two_page_opening': detect_two_page_opening(xml_str),
-                    'image_format': img_ext.lstrip('.'),
-                    'image_path': str(img_out),
-                    'image_sha256': img_sha,
-                    'image_dhash': dhash_hex,
-                    'raw_text': raw_text,
-                    'text': cleaned_text,
-                    'word_count': len(cleaned_text.split()),
-                    'license': 'CC-BY-4.0',
-                    'split': split,
-                })
-                corpus_report[f'revcity_admitted_{split}'] += 1
-                corpus_report[f'revcity_ext_{img_ext.lstrip(".")}'] += 1
+    for sp in ('train', 'val', 'test_public'):
+        all_records_by_split[sp].extend(rc_summary['manifests'][sp])
+    hard_case_rows.extend(rc_summary['manifests']['hard_case_panel'])
+    corpus_report.update(rc_summary['counts'])
+    val_audit = rc_summary['val_disjoint_audit']
+    test_audit = rc_summary['test_disjoint_audit']
+    val_test_audit = rc_summary['val_test_disjoint_audit']
 
 if INCLUDE_LOC_BY_THE_PEOPLE:
     loc_dir = WORK_ROOT / 'loc_btp'
@@ -301,7 +92,14 @@ if INCLUDE_LOC_BY_THE_PEOPLE:
             accepted, reason = filter_corpus_record({'source_name': 'LOC By the People', 'license': 'Public Domain', 'text': raw_text})
             cleaned_text = clean_diplomatic_target(raw_text)
             if not accepted or len(cleaned_text.split()) < 8:
-                hard_case_rows.append({'record_id': f'loc-btp-{row_idx:05d}', 'reason': reason if not accepted else 'under_8_words', 'raw_text': raw_text})
+                has_empty_alto = (len(raw_text.strip()) == 0)
+                hard_case_rows.append({
+                    'record_id': f'loc-btp-{row_idx:05d}',
+                    'reason': reason if not accepted else 'under_8_words',
+                    'has_empty_alto_text': has_empty_alto,
+                    'ground_truth_status': 'missing_or_unverified_gt' if has_empty_alto else 'under_8_words',
+                    'raw_text': raw_text,
+                })
                 continue
             try:
                 jpg_bytes = fetch_bytes_polite(img_url, delay_s=0.4)
@@ -337,36 +135,7 @@ assert len(train_rows) >= 1 and len(val_rows) >= 8 and len(test_public_rows) >= 
     f'Splits too small (check grouping/flags): train={len(train_rows)}, val={len(val_rows)}, test={len(test_public_rows)}'
 )
 
-val_audit = audit_split_disjointness(train_rows, val_rows, ngram_size=32, max_dhash_distance=4)
-test_audit = audit_split_disjointness(train_rows, test_public_rows, ngram_size=32, max_dhash_distance=4)
-val_test_audit = audit_split_disjointness(val_rows, test_public_rows, ngram_size=32, max_dhash_distance=4)
-assert val_audit['passed'], f'Train/Val leakage detected: {val_audit}'
-assert test_audit['passed'], f'Train/Test leakage detected: {test_audit}'
-assert val_test_audit['passed'], f'Val/Test leakage detected: {val_test_audit}'
-
-train_doc_ids = {r['document_id'] for r in train_rows}
-val_doc_ids = {r['document_id'] for r in val_rows}
-test_doc_ids = {r['document_id'] for r in test_public_rows}
-hard_case_held_out = []
-for hc in hard_case_rows:
-    did = hc.get('document_id')
-    if did in test_doc_ids:
-        hc['split_overlap'] = 'test_public'
-        hc['panel_role'] = 'diagnostic_overlaps_test'
-    elif did in train_doc_ids:
-        hc['split_overlap'] = 'train'
-        hc['panel_role'] = 'diagnostic_overlaps_train'
-    elif did in val_doc_ids:
-        hc['split_overlap'] = 'val'
-        hc['panel_role'] = 'held_out_from_train_val_doc'
-        hard_case_held_out.append(hc)
-    else:
-        hc['split_overlap'] = 'none'
-        hc['panel_role'] = 'held_out_from_train_and_test'
-        hard_case_held_out.append(hc)
-
-manifest_dir = OUTPUT_ROOT / 'manifests'
-manifest_dir.mkdir(parents=True, exist_ok=True)
+hard_case_held_out = tag_hard_case_overlaps(hard_case_rows, train_rows, val_rows, test_public_rows)
 all_manifests = {
     **all_records_by_split,
     'hard_case_panel': hard_case_rows,
@@ -374,25 +143,11 @@ all_manifests = {
     'challenge_loc': loc_challenge_rows,
 }
 for split_name, rows in all_manifests.items():
-    (manifest_dir / f'{split_name}.jsonl').write_text(
-        '\\n'.join(json.dumps(r, ensure_ascii=False) for r in rows) + ('\\n' if rows else ''),
-        encoding='utf-8',
-    )
-
-def _split_stats(rows):
-    return {
-        'pages': len(rows),
-        'documents': len({r['document_id'] for r in rows}),
-        'attributed_hands': len({r['writer_key'] for r in rows if r.get('writer_attributed')}),
-        'unattributed_pages': sum(1 for r in rows if not r.get('writer_attributed')),
-        'two_page_openings': sum(1 for r in rows if r.get('is_two_page_opening')),
-        'words': sum(r['word_count'] for r in rows),
-        'collections': dict(Counter(r['collection'] for r in rows)),
-    }
+    write_jsonl_atomic(manifest_dir / f'{split_name}.jsonl', rows)
 
 audit_summary = {
     'counts': dict(corpus_report),
-    'splits': {k: _split_stats(v) for k, v in all_records_by_split.items()},
+    'splits': {k: split_summary_stats(v) for k, v in all_records_by_split.items()},
     'hard_case_panel_pages': len(hard_case_rows),
     'challenge_loc_pages': len(loc_challenge_rows),
     'dhash_review_candidates': (
