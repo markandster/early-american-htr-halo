@@ -36,12 +36,12 @@ $$R(y, y^*) = 0.6 \max\left(0,\, 1 - \text{CER}_{\text{strict}}(y, y^*)\right) +
 
 All competition and public training recipes enforce a strict license allowlist (`CC-BY-4.0`, `CC0-1.0`, `Public Domain`) via `eahtr.corpus.verify_source_license`:
 
-- **Revolutionary City HTR Corpus** (Zenodo `15776323`, `CC-BY-4.0`, `INCLUDE_REVCITY = True`) — pairs both `.jpg`/`.jpeg` and `.png` images with ALTO-XML parsed geometrically (`eahtr.corpus.parse_alto_xml_lines`), retains both `raw_text` and cleaned `text`, flags two-page openings (`detect_two_page_opening`), groups related adjacent/recto-verso item IDs (`assign_revcity_item_groups`), and splits all groups deterministically before any smoke subsampling. Dropped blanks, leader-dot slips, and duplicate-line pages route to `hard_case_panel.jsonl`.
+- **Revolutionary City HTR Corpus** (Zenodo `15776323`, `CC-BY-4.0`, `INCLUDE_REVCITY = True`) — pairs both `.jpg`/`.jpeg` and `.png` images with ALTO-XML (`eahtr.corpus.parse_alto_xml_lines(..., sort_regions=False)` preserving annotated reading order by default), verifies `REVCITY_ZENODO_MD5` integrity, retains both `raw_text` and cleaned `text`, flags two-page openings (`detect_two_page_opening`), groups related adjacent/recto-verso item IDs (`assign_revcity_item_groups(max_id_gap=5)`), and assigns size-capped, per-institution balanced splits (`assign_balanced_group_splits`) before round-robin smoke subsampling. Dropped blanks, leader-dot slips, and duplicate-line pages route to `hard_case_panel.jsonl` and strictly disjoint `hard_case_held_out.jsonl`.
 - **Library of Congress *By the People*** (`LCCN 2020446971`, `Public Domain`, opt-in `INCLUDE_LOC_BY_THE_PEOPLE = False`) — evaluated separately as a **genre-shift challenge panel**.
-- **Strict Dev vs. Frozen Test Discipline:** Development notebooks and sweeps score **`val` only** (with hash-keyed caches and same-checkpoint image-swap causal checks); `test_public` remains untouched until final checkpoint freeze.
+- **Strict Dev vs. Frozen Test Discipline:** Development notebooks and sweeps score **`val` only** (with hash-keyed caches and same-checkpoint image-swap causal checks; Stage-2 preference rollouts use strictly held-out `oof_train` shards); `test_public` remains untouched until final checkpoint freeze.
 - **Opt-in Hugging Face Hub Export (`PUBLISH_TO_HF_DATASET = False`):** Validates **all pairwise splits** (`train` vs `val`, `train` vs `test_public`, `val` vs `test_public`) via `eahtr.hf_dataset` and emits Halo-ready `messages` + `images` (`Sequence(Image())`) columns.
 
-All splits are gated by `eahtr.hygiene.audit_split_disjointness` across `document_id`, `writer_key`, `image_sha256`, perceptual `dHash` (`compute_dhash`, Hamming `<= 4`), normalized full-page text hashes (`>= 8` words), and 32-word SHA-256 n-grams.
+All splits enforce hard disjointness via `eahtr.hygiene.audit_split_disjointness` across `document_id`, `writer_key`, `image_sha256`, normalized exact-text hashes (`>= 8` words), and 32-word SHA-256 n-grams, plus advisory perceptual `dHash` review (`dhash_review_candidates`, Hamming `<= 4`).
 
 ---
 
@@ -68,13 +68,13 @@ See [docs/TRAINING_PLAN.md](docs/TRAINING_PLAN.md) for the full competition trai
 ├── results/                      # Held-out evaluation & ablation ledger
 ├── scripts/
 │   ├── validate_halo_configs.py  # Two-tier Halo config validator (CI + --halo-repo CPU Tier-2)
-│   ├── stage_gemma4_highres.py   # Zero-copy 1120 soft-token Gemma 4 staging helper
+│   ├── stage_gemma4_highres.py   # Writable config + symlinked weight 1120-token Gemma 4 staging
 │   ├── export_halo_datasets.py   # Post-expansion VLM Arrow DatasetDict exporter
 │   ├── run_halo_smoke.sh         # Clean-room Python 3.12 1x GPU SFT + merge + continuity + SMPO smoke
 │   ├── run_gemma4_halo.sh        # Canonical Gemma 4 12B Halo launcher & post-train merge/verify
 │   ├── merge_and_eval_halo.py    # Halo adapter merge & frozen single-run val/test evaluator
-│   ├── generate_halo_rollouts.py # Merged Stage 1 K=4 rollout sampler & GPU-hour estimator
-│   └── verify_mlx_export.py      # Hardened Jinja2/token-parity & 1120-token MLX export verifier
+│   ├── generate_halo_rollouts.py # OOF-guarded Stage 1 K=4 rollout sampler & GPU-hour estimator
+│   └── verify_mlx_export.py      # Hardened multimodal Jinja2/token-parity & 1120-token export verifier
 ├── src/eahtr/                    # Modular Apache-2.0 Python package (<= 450 lines/module)
 └── tests/                        # Pytest unit suite (metrics, rewards, hygiene, corpus, HF, Halo)
 ```
