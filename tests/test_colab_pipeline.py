@@ -159,6 +159,8 @@ def test_generated_notebook_valid_json_ast_and_public_only(tmp_path: Path) -> No
         "ROLLOUT_TEMPS",
         "exclude_modules=vision_modules",
         "modelopt",
+        "SC_PHYS_PAGES",
+        "Missing required",
     )
     for marker in expected_markers:
         assert marker in raw_text, f"Missing expected notebook marker: {marker}"

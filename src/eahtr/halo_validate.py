@@ -152,9 +152,9 @@ def validate_yaml_configs_tier1(config_dir: Path, repo_root: Path | None = None)
 def _trainer_spec_for_config(name: str) -> str:
     if name.endswith("_sft.yaml"):
         return "sft"
-    if "_vlm_smpo" in name:
+    if "_vlm_smpo" in name or name.endswith("_smpo.yaml"):
         return "smpo"
-    if "_vlm_dpo" in name:
+    if "_vlm_dpo" in name or name.endswith("_dpo.yaml"):
         return "dpo"
     if "offline_grpo" in name or "_grpo_offline" in name:
         return "grpo_offline"

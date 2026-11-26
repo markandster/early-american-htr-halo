@@ -339,26 +339,39 @@ def run_candidate_arm(cand_key: str, arm: str, arm_train_rows: list[dict], val_s
     )
 
     merged_dir = out_dir / 'merged_hf'
+    merged_dir_str = None
     if not use_4bit:
         merged_model = model.merge_and_unload()
         merged_model.save_pretrained(merged_dir, safe_serialization=True)
         processor.save_pretrained(merged_dir)
         del merged_model
+        _assert_highres_processor_config(merged_dir, spec.hf_repo)
+        merged_dir_str = str(merged_dir)
     else:
         del model, optimizer, scheduler
         gc.collect()
         torch.cuda.empty_cache()
-        cpu_base = load_vlm_model(
-            spec.hf_repo,
-            {'device_map': 'cpu', 'torch_dtype': torch.bfloat16, 'trust_remote_code': spec.trust_remote_code},
-        )
-        merged_model = PeftModel.from_pretrained(cpu_base, str(out_dir / 'adapter_best')).merge_and_unload()
-        merged_model.save_pretrained(merged_dir, safe_serialization=True)
-        processor.save_pretrained(merged_dir)
-        del merged_model, cpu_base
+        try:
+            host_ram_gb = (os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES')) / (1024 ** 3)
+        except Exception:
+            host_ram_gb = None
+        if host_ram_gb is not None and spec.params_b * 3.0 > host_ram_gb:
+            print(
+                f'[SKIP MERGE] Host RAM {host_ram_gb:.1f} GB < ~{spec.params_b * 3.0:.0f} GB needed for CPU BF16 merge of {spec.hf_repo}; '
+                f'adapter saved at {out_dir / "adapter_best"}. Use Halo merge_peft_adapters.py (without --device_map or --fp32_norms) on a High-RAM/GPU host.'
+            )
+        else:
+            cpu_base = load_vlm_model(
+                spec.hf_repo,
+                {'device_map': 'cpu', 'torch_dtype': torch.bfloat16, 'trust_remote_code': spec.trust_remote_code},
+            )
+            merged_model = PeftModel.from_pretrained(cpu_base, str(out_dir / 'adapter_best')).merge_and_unload()
+            merged_model.save_pretrained(merged_dir, safe_serialization=True)
+            processor.save_pretrained(merged_dir)
+            del merged_model, cpu_base
+            _assert_highres_processor_config(merged_dir, spec.hf_repo)
+            merged_dir_str = str(merged_dir)
         model = optimizer = scheduler = None
-
-    _assert_highres_processor_config(merged_dir, spec.hf_repo)
 
     payload = {
         'candidate': cand_key,
@@ -375,7 +388,7 @@ def run_candidate_arm(cand_key: str, arm: str, arm_train_rows: list[dict], val_s
         'predictions_sha256': hashlib.sha256(pred_bytes).hexdigest(),
         'scores': test_eval['scores'],
         'adapter_dir': str(out_dir / 'adapter_best'),
-        'merged_hf_dir': str(merged_dir),
+        'merged_hf_dir': merged_dir_str,
     }
     score_file.write_text(json.dumps(payload, indent=2), encoding='utf-8')
     print(f'[DONE {cand_key}-{arm}] public test:', payload['scores'])

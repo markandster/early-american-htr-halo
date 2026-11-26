@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -246,10 +247,71 @@ def build_smoke_yaml_configs(
         yaml.safe_load(base_smpo_yaml.read_text(encoding="utf-8")), smpo_dataset_dir, "smpo_out", is_smpo=True
     )
     sft_out = out_dir / "smoke_sft.yaml"
-    smpo_out = out_dir / "smoke_smpo.yaml"
+    smpo_out = out_dir / "smoke_vlm_smpo.yaml"
     sft_out.write_text(yaml.safe_dump(sft_cfg, sort_keys=False), encoding="utf-8")
     smpo_out.write_text(yaml.safe_dump(smpo_cfg, sort_keys=False), encoding="utf-8")
     return sft_out, smpo_out
+
+
+def verify_processor_image_tokens(
+    processor: Any,
+    image_path: Path,
+    *,
+    prompt_text: str = DEFAULT_SMOKE_PROMPT,
+    min_tokens: int = 281,
+    max_tokens: int = 1120,
+) -> int:
+    """Encode a real manuscript page with processor and assert expanded image token count."""
+    from PIL import Image
+
+    if not image_path.is_file():
+        raise FileNotFoundError(f"Sample image not found for processor verification: {image_path}")
+    messages = [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": prompt_text}]}]
+    try:
+        rendered = processor.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
+        )
+    except TypeError:
+        rendered = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+
+    with Image.open(image_path) as raw_img:
+        encoded = processor(text=[rendered], images=[raw_img.convert("RGB")], return_tensors="pt")
+
+    ids = encoded["input_ids"][0]
+    ids_list = ids.tolist() if hasattr(ids, "tolist") else list(ids)
+    tok = getattr(processor, "tokenizer", processor)
+    img_tid = getattr(tok, "image_token_id", None)
+    if img_tid is None:
+        vocab = tok.get_vocab() if hasattr(tok, "get_vocab") else {}
+        img_tid = vocab.get("<|image|>") or vocab.get("<image_soft_token>")
+    if img_tid is None:
+        raise ValueError("Unable to resolve image_token_id on processor/tokenizer")
+
+    count = sum(1 for tid in ids_list if int(tid) == int(img_tid))
+    if not (min_tokens <= count <= max_tokens):
+        raise ValueError(
+            f"Realized processor image token count {count} outside [{min_tokens}, {max_tokens}]"
+        )
+    return count
+
+
+_LOSS_LOG_RE = re.compile(r"['\"]?loss['\"]?\s*[:=]\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?|nan|inf|-inf)", re.I)
+
+
+def verify_halo_run_log_finite_loss(log_path: Path) -> list[float]:
+    """Assert Halo training run log recorded >= 1 finite training loss and zero NaN/Inf."""
+    if not log_path.is_file():
+        raise FileNotFoundError(f"Expected Halo run log not found: {log_path}")
+    text = log_path.read_text(encoding="utf-8", errors="replace")
+    losses: list[float] = []
+    for match in _LOSS_LOG_RE.finditer(text):
+        val = float(match.group(1))
+        if not math.isfinite(val):
+            raise ValueError(f"Non-finite training loss {match.group(1)!r} detected in {log_path}")
+        losses.append(val)
+    if not losses:
+        raise ValueError(f"No training loss metrics found in {log_path}")
+    return losses
 
 
 def verify_train_sample_image_tokens(sample_txt: Path, *, min_tokens: int = 281, max_tokens: int = 1120) -> int:
@@ -276,7 +338,7 @@ def write_halo_smoke_notebook(out_path: Path) -> Path:
                 "\n",
                 "Runs an external `whitecircle/halo` Python 3.12 smoke check (5 steps of `sft.py` ",
                 "and 5 steps of `smpo.py`) on 16 rights-cleared RevCity (`CC-BY-4.0`) manuscript pages, ",
-                "verifying `max_soft_tokens=1120` in `<output_dir>/log/train_sample.txt`.",
+                "verifying `1120` realized image tokens on the staged Gemma 4 processor and finite 5-step training loss.",
             ],
         },
         {

@@ -88,11 +88,17 @@ def run_eval_panel(model, processor, rows: list[dict], panel_name: str, max_new_
 
 
 def _assert_highres_processor_config(model_dir: Path, hf_repo: str) -> None:
+    jinja_path = model_dir / 'chat_template.jinja'
+    tok_cfg_path = model_dir / 'tokenizer_config.json'
+    has_template = jinja_path.is_file() and bool(jinja_path.read_text(encoding='utf-8').strip())
+    if not has_template and tok_cfg_path.is_file():
+        tok_cfg = json.loads(tok_cfg_path.read_text(encoding='utf-8'))
+        has_template = isinstance(tok_cfg.get('chat_template'), str) and bool(tok_cfg['chat_template'].strip())
+    assert has_template, f'{model_dir}: missing non-empty chat_template in merged export'
     if 'gemma-4' not in hf_repo.lower():
         return
     cfg_path = model_dir / 'processor_config.json'
-    if not cfg_path.is_file():
-        return
+    assert cfg_path.is_file(), f'Missing required {cfg_path} in merged Gemma 4 export'
     data = json.loads(cfg_path.read_text(encoding='utf-8'))
     assert data.get('image_seq_length') == 1120, f'{cfg_path}: expected image_seq_length==1120'
     ip = data.get('image_processor', {})
