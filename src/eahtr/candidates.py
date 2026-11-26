@@ -231,6 +231,10 @@ def assign_balanced_group_splits(
 
 _REVCITY_STEM_RE = re.compile(r"^([A-Za-z]+)(?:%3A|_|:)(\d+)(?:_[A-Za-z0-9]+)?$")
 _HYPHEN_MANUSCRIPT_RE = re.compile(r"^([A-Za-z0-9_]+)-\d+(?:_[A-Za-z0-9]+)?$")
+REVCITY_COLLECTION_OVERRIDES: tuple[tuple[str, int, int, str], ...] = (
+    ("apsrevcity", 16255, 16706, "apsrevcity:col_richard_henry_lee_16255_16706"),
+    ("apsrevcity", 7228, 7545, "apsrevcity:col_us_lottery_7228_7545"),
+)
 
 
 def parse_revcity_stem_id(stem_name: str) -> tuple[str, int | None, str]:
@@ -293,6 +297,14 @@ def assign_revcity_item_groups(
             cur_prev = num
             run_items.append((stem, inst, safe_id))
     _flush_run()
+
+    for inst, num, safe_id, stem in numeric_entries:
+        for o_inst, lo, hi, col_gid in REVCITY_COLLECTION_OVERRIDES:
+            if inst == o_inst and lo <= num <= hi:
+                groups[stem]["document_id"] = col_gid
+                if groups[stem]["hand_attributed"] != "true":
+                    groups[stem]["writer_key"] = f"unattributed_item:{col_gid}"
+                break
 
     for stem, inst, num, safe_id in parsed:
         if num is None:

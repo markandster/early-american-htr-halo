@@ -191,12 +191,23 @@ def _select_doc_disjoint_pilot(rows: list[dict], max_pages: int | None, seed: in
     return picked or list(rows[:max_pages])
 
 
+def _assign_balanced_folds(rows: list[dict], num_folds: int, seed: int) -> dict[str, int]:
+    by_key = {}
+    for r in rows:
+        by_key.setdefault(_fold_key(r), []).append(r)
+    loads = [0] * num_folds
+    fold_map = {}
+    for key in sorted(by_key, key=lambda k: (-len(by_key[k]), hashlib.sha256(f'{seed}:{k}'.encode()).hexdigest())):
+        best_fold = min(range(num_folds), key=lambda f: loads[f])
+        fold_map[key] = best_fold
+        loads[best_fold] += len(by_key[key])
+    return fold_map
+
+
 val_slice = _stratified_eval_slice(val_rows, VAL_EVAL_MAX_PAGES, SEED)
 if OOF_NUM_FOLDS > 1:
-    active_train_rows = [
-        r for r in train_rows
-        if (int(hashlib.sha256(_fold_key(r).encode()).hexdigest()[:8], 16) % OOF_NUM_FOLDS) != OOF_FOLD_IDX
-    ]
+    fold_map = _assign_balanced_folds(train_rows, OOF_NUM_FOLDS, SEED)
+    active_train_rows = [r for r in train_rows if fold_map[_fold_key(r)] != OOF_FOLD_IDX]
 else:
     active_train_rows = train_rows
 pilot_train_rows = _select_doc_disjoint_pilot(active_train_rows, SHAM_MAX_PRESENTATIONS, SEED)
@@ -283,11 +294,11 @@ if GENERATE_OFFLINE_GRPO_ROLLOUTS:
     oof_rows = [r for r in train_rows if r['document_id'] not in trained_docs and _fold_key(r) not in trained_keys]
     fold_tag = f'fold_{OOF_FOLD_IDX}_of_{OOF_NUM_FOLDS}' if OOF_NUM_FOLDS > 1 else ('smoke_doc_oof' if oof_rows else 'in_sample_train')
     if oof_rows and ROLLOUT_SOURCE == 'oof_train':
-        rollout_rows = oof_rows[:GRPO_ROLLOUT_PROMPTS]
+        rollout_rows = _stratified_eval_slice(oof_rows, GRPO_ROLLOUT_PROMPTS, SEED)
         is_oof = True
     elif ALLOW_IN_SAMPLE_TRAIN_ROLLOUTS:
         print('[WARN] No document-disjoint held-out train fold rows remain; using in-sample train rows because ALLOW_IN_SAMPLE_TRAIN_ROLLOUTS=True.')
-        rollout_rows = train_rows[:GRPO_ROLLOUT_PROMPTS]
+        rollout_rows = _stratified_eval_slice(train_rows, GRPO_ROLLOUT_PROMPTS, SEED)
         is_oof = False
     else:
         raise RuntimeError(

@@ -131,6 +131,7 @@ def _build_arm_cache_key(cand_key: str, arm: str, spec, train_rows: list[dict], 
         'max_new': MAX_EVAL_NEW_TOKENS, 'seed': SEED, 'freeze_eval': FINAL_FREEZE_EVAL_TEST_PUBLIC,
         'oof': [globals().get('OOF_NUM_FOLDS', 1), globals().get('OOF_FOLD_IDX', 0)],
         'use_4bit': use_4bit, 'git_sha': globals().get('REPO_GIT_SHA', 'unknown'), 'tpl': tpl_sha, 'prompt': prompt_sha,
+        'max_px': spec.max_pixels, 'lora_targets': list(spec.lora_target_modules), 'vis_pats': list(spec.vision_trainable_patterns),
         'train_sig': [[r.get('record_id', ''), r.get('image_sha256', ''), hashlib.sha256(r.get('text', '').encode()).hexdigest()[:12], r.get('sham_donor_record_id', '')] for r in train_rows],
         'eval_sig': [[r.get('record_id', ''), r.get('image_sha256', ''), hashlib.sha256(r.get('text', '').encode()).hexdigest()[:12]] for r in eval_rows],
     }
@@ -296,6 +297,7 @@ def run_candidate_arm(cand_key: str, arm: str, arm_train_rows: list[dict], val_s
     skipped_overlength = 0
     verified_step1_grads = False
     realized_image_tokens = None
+    opt_step = 0
 
     for epoch in range(1, EPOCHS + 1):
         model.train()
@@ -349,6 +351,10 @@ def run_candidate_arm(cand_key: str, arm: str, arm_train_rows: list[dict], val_s
                 scheduler.step()
                 optimizer.zero_grad(set_to_none=True)
                 accum_count = 0
+                opt_step += 1
+                if globals().get('CHECKPOINT_EVERY_OPT_STEPS', 0) > 0 and opt_step % int(CHECKPOINT_EVERY_OPT_STEPS) == 0:
+                    model.save_pretrained(run_dir / 'adapter_last')
+                    processor.save_pretrained(run_dir / 'adapter_last')
 
         if accum_count > 0:
             scale = GRAD_ACCUM_STEPS / accum_count

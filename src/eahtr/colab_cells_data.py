@@ -157,7 +157,8 @@ SMOKE_TEST_MODE = True
 # Available keys: ['gemma4_12b']
 CANDIDATE_KEYS = ['gemma4_12b']
 ARMS = ['baseline_zeroshot', 'real', 'sham_short']
-SHAM_MAX_PRESENTATIONS = 128 if SMOKE_TEST_MODE else None
+SHAM_MAX_PRESENTATIONS = 128 if SMOKE_TEST_MODE else 512
+CHECKPOINT_EVERY_OPT_STEPS = 50
 
 # Public rights-cleared datasets (CC-BY-4.0 / Public Domain ONLY)
 INCLUDE_REVCITY = True

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from pathlib import Path
 import subprocess
 import sys
@@ -69,7 +70,12 @@ def main() -> int:
             )
             return 2
         try:
-            base_map = {str(r["record_id"]).strip(): float(r["strict_cer"]) for r in base_rows}
+            base_map = {}
+            for r in base_rows:
+                val = float(r["strict_cer"])
+                if not math.isfinite(val):
+                    raise ValueError(f"Non-finite strict_cer={val!r}")
+                base_map[str(r["record_id"]).strip()] = val
         except (KeyError, TypeError, ValueError) as exc:
             print(f"Invalid strict_cer entry in {args.baseline_predictions}: {exc}", file=sys.stderr)
             return 2

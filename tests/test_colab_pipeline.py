@@ -55,6 +55,13 @@ def test_all_competition_candidates_pass_policy() -> None:
     assert groups["lcprevcity_159_OBJ"]["writer_key"] == "scribed_hand:hand_xyz"
     assert groups["lcprevcity_159_OBJ"]["hand_attributed"] == "true"
 
+    col_groups = assign_revcity_item_groups(
+        ["apsrevcity%3A16255", "apsrevcity%3A16700", "apsrevcity%3A7228", "apsrevcity%3A7540"],
+        max_id_gap=30,
+    )
+    assert col_groups["apsrevcity%3A16255"]["document_id"] == col_groups["apsrevcity%3A16700"]["document_id"]
+    assert col_groups["apsrevcity%3A7228"]["document_id"] == col_groups["apsrevcity%3A7540"]["document_id"]
+
 
 def test_resolve_vision_modules_across_model_families() -> None:
     gemma12b_modules = [
@@ -172,6 +179,8 @@ def test_generated_notebook_valid_json_ast_and_public_only(tmp_path: Path) -> No
         "max_id_gap=30",
         "_merge_saved_adapter",
         "_fold_key",
+        "_assign_balanced_folds",
+        "CHECKPOINT_EVERY_OPT_STEPS",
         "hard_case_panel",
         "USE_GOOGLE_DRIVE",
         "llm_int8_skip_modules",

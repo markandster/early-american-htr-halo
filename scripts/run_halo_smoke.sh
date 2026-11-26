@@ -306,10 +306,19 @@ probe_out.write_text(json.dumps(collected), encoding="utf-8")
 probe_json = work / "configs" / "stage2_probe_lps.json"
 subprocess.check_call([sys.executable, "-c", stage2_probe, str(work), str(probe_json)])
 stage2_lps = json.loads(probe_json.read_text(encoding="utf-8"))
-s2_tol = max(0.05, min(0.15, 0.25 * sft_shift)) if vram_gb >= 56.0 else max(0.15, min(0.35, 0.5 * sft_shift))
+base_tol = 0.05 if vram_gb >= 56.0 else 0.15
+s2_tol = min(0.15 if vram_gb >= 56.0 else 0.35, max(base_tol, 0.4 * sft_shift))
+stage2_vs_base_diff = max(abs(a - b) for a, b in zip(base_lps, stage2_lps))
 report = verify_stage_continuity_logprobs(base_lps, sft_lps, stage2_lps, tol=s2_tol)
+if sft_shift < 2.0 * s2_tol:
+    print(f"[WARN] Low Stage 2 continuity separation power: sft_shift={sft_shift:.6f} < 2*s2_tol ({2.0 * s2_tol:.6f})")
 if report["max_step0_diff"] > 0.05:
     print(f"[WARN] Stage 2 step-0 vs merged SFT max logit diff={report['max_step0_diff']:.6f} > 0.05 (tol={s2_tol:.6f}, sft_shift={sft_shift:.6f})")
+assert report["max_step0_diff"] < 0.5 * sft_shift and stage2_vs_base_diff >= 0.5 * sft_shift, (
+    f"Stage 2 continuity lacks power / fell back toward base (step0_diff={report['max_step0_diff']:.6f}, stage2_vs_base={stage2_vs_base_diff:.6f}, sft_shift={sft_shift:.6f})"
+)
+report["s2_tol"] = round(s2_tol, 6)
+report["stage2_vs_base_diff"] = round(stage2_vs_base_diff, 6)
 report["live_vs_merged_diff"] = merge_diff
 print("Verified Stage 1->2 continuity (via Halo SMPOTrainer):", report)
 PY

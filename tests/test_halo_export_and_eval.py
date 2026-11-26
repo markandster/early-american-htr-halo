@@ -65,13 +65,17 @@ def test_halo_export_helpers_and_dir_verifier(tmp_path: Path, monkeypatch: pytes
     with pytest.raises(ValueError, match="Split disjointness"):
         export_halo_vlm_preference_dataset(pair_train, pair_train, tmp_path / "bad_pref", lambda s: len(s.split()))
 
-    with pytest.raises(ValueError, match="eval/test split row"):
+    with pytest.raises(ValueError, match="non-train or missing split row"):
         export_halo_vlm_preference_dataset(
             [{**pair_train[0], "split": "test_public"}], pair_test, tmp_path / "bad_split_pref", lambda s: len(s.split())
         )
-    with pytest.raises(ValueError, match="eval/test split row"):
+    with pytest.raises(ValueError, match="non-train or missing split row"):
         export_halo_vlm_preference_dataset(
             [{**pair_train[0], "split": "challenge_loc"}], pair_test, tmp_path / "bad_loc_pref", lambda s: len(s.split())
+        )
+    with pytest.raises(ValueError, match="non-train or missing split row"):
+        export_halo_vlm_preference_dataset(
+            [{k: v for k, v in pair_train[0].items() if k != "split"}], pair_test, tmp_path / "missing_split_pref", lambda s: len(s.split())
         )
 
     pairs = build_preference_pairs(
@@ -242,6 +246,11 @@ def test_merge_and_eval_cli_guards_and_rollout_manifest_refusal(tmp_path: Path, 
     monkeypatch.setattr(sys, "argv", ["merge_and_eval_halo.py", "--model-dir", str(mdl_dir), "--eval-jsonl", str(eval_jsonl), "--out-json", str(out_json), "--baseline-predictions", str(empty_id_base)])
     assert mod.main() == 2
 
+    nan_base = tmp_path / "nan_base.json"
+    nan_base.write_text(json.dumps([{"record_id": "r1", "strict_cer": float("nan")}, {"record_id": "r2", "strict_cer": 0.5}]), encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", ["merge_and_eval_halo.py", "--model-dir", str(mdl_dir), "--eval-jsonl", str(eval_jsonl), "--out-json", str(out_json), "--baseline-predictions", str(nan_base)])
+    assert mod.main() == 2
+
     class _FakeTensor:
         def __init__(self, shape: tuple[int, ...]) -> None:
             self.shape = shape
@@ -257,6 +266,8 @@ def test_merge_and_eval_cli_guards_and_rollout_manifest_refusal(tmp_path: Path, 
             return self
 
     class _FakeProc:
+        tokenizer = staticmethod(lambda *a, **kw: {"input_ids": [1, 2]})
+
         @classmethod
         def from_pretrained(cls, *a: object) -> "_FakeProc":
             return cls()
@@ -317,3 +328,8 @@ def test_merge_and_eval_cli_guards_and_rollout_manifest_refusal(tmp_path: Path, 
     hc_jsonl.write_text(json.dumps({"record_id": "h1", "image_path": str(img_a), "text": "Dear Sir"}) + "\n", encoding="utf-8")
     monkeypatch.setattr(sys, "argv", ["generate_halo_rollouts.py", "--model-dir", str(mdl_dir), "--train-jsonl", str(hc_jsonl), "--out-pref-jsonl", str(tmp_path / "p.jsonl")])
     assert r_mod.main() == 2
+
+    valid_name_jsonl = tmp_path / "train_validated.jsonl"
+    valid_name_jsonl.write_text(json.dumps({"record_id": "v1", "document_id": "d1", "writer_key": "w1", "split": "train", "image_path": str(img_a), "text": "Dear Sir"}) + "\n", encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", ["generate_halo_rollouts.py", "--model-dir", str(mdl_dir), "--train-jsonl", str(valid_name_jsonl), "--out-pref-jsonl", str(tmp_path / "p_ok.jsonl")])
+    assert r_mod.main() == 0

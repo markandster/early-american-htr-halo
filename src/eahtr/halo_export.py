@@ -152,9 +152,9 @@ def export_halo_vlm_preference_dataset(
         rows: list[dict[str, Any]] = []
         for idx, row in enumerate(pairs):
             split_val = str(row.get("split") or "").strip().lower()
-            if forbid_eval_splits and split_val and split_val != "train":
+            if forbid_eval_splits and split_val != "train":
                 raise ValueError(
-                    f"Refusing eval/test split row ({split_val!r}) inside Stage-2 preference train_pairs"
+                    f"Refusing non-train or missing split row ({split_val!r}) inside Stage-2 preference train_pairs"
                 )
             imgs = row.get("images") or ([row["image_path"]] if row.get("image_path") else [])
             rows.append(
@@ -329,7 +329,16 @@ def verify_exported_vlm_dir(
             if Image is not None and hasattr(Image, "new"):
                 ref_proc = auto_proc_cls.from_pretrained(str(reference_dir))
                 exp_proc = auto_proc_cls.from_pretrained(str(model_dir))
-                probe_img = Image.new("RGB", (16, 16), (255, 255, 255))
+                if hasattr(Image, "frombytes"):
+                    raw_rgb = bytes(
+                        c
+                        for y in range(16)
+                        for x in range(16)
+                        for c in ((x * 16 + y) % 256, (y * 16 + 64) % 256, ((x ^ y) * 16) % 256)
+                    )
+                    probe_img = Image.frombytes("RGB", (16, 16), raw_rgb)
+                else:
+                    probe_img = Image.new("RGB", (16, 16), (255, 255, 255))
                 ref_p = ref_proc.apply_chat_template(sample, tokenize=False, add_generation_prompt=True)
                 exp_p = exp_proc.apply_chat_template(sample, tokenize=False, add_generation_prompt=True)
                 ref_enc = ref_proc(text=[ref_p], images=[probe_img], return_tensors="pt")

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import re
 import time
 
 from eahtr.candidates import DIPLOMATIC_PROMPT
@@ -34,7 +35,9 @@ def main() -> int:
 
     rows = [json.loads(line) for line in args.train_jsonl.read_text(encoding="utf-8").splitlines() if line.strip()]
     has_non_train = any(str(r.get("split") or "").strip().lower() != "train" for r in rows)
-    has_forbidden_name = any(tok in args.train_jsonl.name.lower() for tok in ("val", "test", "hard_case"))
+    has_forbidden_name = bool(
+        re.search(r"(?:^|[_\-.])(val|validation|test|test_public|hard_case)(?:$|[_\-.])", args.train_jsonl.name.lower())
+    )
     if (has_non_train or has_forbidden_name) and not args.allow_eval_split:
         print(
             f"Refusing non-train or eval/hard_case manifest {args.train_jsonl} for Stage-2 rollout generation; pass out-of-fold split='train' shards or --allow-eval-split.",
