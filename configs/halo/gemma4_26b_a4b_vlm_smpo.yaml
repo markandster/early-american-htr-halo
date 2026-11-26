@@ -1,0 +1,61 @@
+# Halo VLM SMPO — Gemma-4 26B-A4B-IT MoE (Stage 2 Verifiable Preference Optimization).
+# Point --model_name_or_path at the BF16-converted Stage 1 checkpoint (with 1120 processor + template).
+# Launch via scripts/run_gemma4_halo.sh STAGE=smpo MODEL_SIZE=26b_a4b (torchrun --nproc_per_node=8).
+
+# --- Model ---
+model_name_or_path: checkpoints/gemma4-26b-a4b-eahtr-sft-bf16
+moe_balancing: none
+attn_implementation: sdpa
+bf16: true
+expert_parallel_size: 8
+
+# --- Dataset (Arrow save_to_disk dir with Sequence(Image()) and continuation-only chosen/rejected) ---
+dataset:
+  - data/halo_vlm_smpo
+
+# --- SMPO objective & margin schedule ---
+loss_type: smooth_lower_bound
+chosen_sft_ratio: 1.0
+beta: 1.0
+use_margin_schedule: true
+initial_margin: 0.2
+target_margin: 0.4
+lower_clip_percentile: 0.02
+min_log_prob: -2.3
+
+# --- Sequence budgets ---
+padding_free: false
+max_prompt_length: 1600
+max_length: 4096
+
+# --- Tokens & chat template ---
+chat_template: configs/halo/templates/gemma4_htr_nothink.jinja
+force_chat_template: true
+pad_token: <pad>
+
+# --- Full-parameter SMPO ---
+use_peft: false
+
+# --- Training ---
+num_train_epochs: 1.0
+per_device_train_batch_size: 1
+per_device_eval_batch_size: 1
+gradient_accumulation_steps: 2
+learning_rate: 2.0e-6
+lr_scheduler_type: cosine
+warmup_steps: 0.05
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  use_reentrant: false
+
+# --- Checkpointing & logging ---
+output_dir: checkpoints/gemma4-26b-a4b-eahtr-smpo
+eval_strategy: steps
+eval_steps: 25
+save_steps: 25
+save_total_limit: 1
+save_only_model: true
+logging_steps: 1
+logging_first_step: true
+remove_unused_columns: false
+dataloader_num_workers: 2

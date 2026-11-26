@@ -14,7 +14,8 @@ This runbook documents the exact pinned revisions, hardware prerequisites, and c
 | **External Trainer** | `whitecircle/halo` (`53fe34adcc4ef4bef9979ffaa1d50b5b5d4948b2` / `53fe34a`) | Halo License | Cloned externally to `--halo-repo` (`/tmp/halo` or `/workspace/halo`); no `v1.3.0rc2` git tag exists (`hopper-1.3.0rc2` / `blackwell-1.3.0rc2` refer to ECR images) |
 | **Optimizer Dependency** | `Dao-AILab/gram-newton-schulz@244a451d684a39d68f593aef03b6fe7cfa6a31d1` | Open Source | Installed `--no-deps` by `run_halo_smoke.sh` |
 | **Primary Base Model** | `google/gemma-4-12B-it` (`rev 43c9d014b231`) | Apache-2.0 | Ungated; staged to `1,120` soft tokens before training |
-| **Conditional Pilot Model** | `thinkingmachines/Inkling-2-Small` (`rev 885d78bfca61`) | Apache-2.0 | Ungated; requires `EP=8` Dec 1 serving/memory pilot |
+| **Fallback Base Models** | `google/gemma-4-26B-A4B-it` (`rev 4d7ae4984b7db7de8f8457170b3f1a419ee76d52`, MoE `EP=8`), `google/gemma-4-31B-it` (`rev 842da3794eaa0b77d5f08bae87a17459d91ff475`, Dense) | Apache-2.0 | Ungated; staged to `1,120` soft tokens via `run_gemma4_halo.sh` |
+| **Conditional Pilot Model** | `thinkingmachines/Inkling-2-Small` (`rev 885d78bfca61a7e9a498e33cfa7ad35850533b8c`) | Apache-2.0 | Ungated; requires `EP=8` Dec 1 serving/memory pilot |
 | **Training Corpus** | Revolutionary City HTR (`Zenodo 15776323`) | `CC-BY-4.0` | `9,988,850,095` bytes; MD5 `c291f2ebda6e5698f788a06b9520c709` |
 | **Eval-Only Challenge Panel** | LOC *By the People* (`LCCN 2020446971`) | `Public Domain` | Off by default; never mixed into training splits |
 | **Core Python Stack** | Python `3.12`, `torch==2.11.0`, `torchvision==0.26.0`, `transformers==5.23.0`, `trl==1.14.2`, `peft==0.18.1`, `accelerate>=1.11.0,<1.12.0`, `bitsandbytes>=0.49.2,<0.50.0` | — | Halo requires `>=3.12,<3.13` |

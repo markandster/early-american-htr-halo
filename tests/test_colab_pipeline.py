@@ -245,6 +245,10 @@ def test_halo_yaml_configs_match_schema_and_ink2_rules() -> None:
     expected_files = {
         "gemma4_12b_sft.yaml",
         "gemma4_12b_vlm_smpo.yaml",
+        "gemma4_26b_a4b_sft.yaml",
+        "gemma4_26b_a4b_vlm_smpo.yaml",
+        "gemma4_31b_sft.yaml",
+        "gemma4_31b_vlm_smpo.yaml",
         "inkling2_small_sft.yaml",
         "inkling2_small_vlm_smpo.yaml",
         "archival_grpo_offline.yaml",
@@ -271,18 +275,38 @@ def test_halo_yaml_configs_match_schema_and_ink2_rules() -> None:
             assert tpl_path.is_file(), f"{p.name} references missing template {tpl_path}"
         loaded[p.name] = cfg
 
-    for name in ("gemma4_12b_sft.yaml", "gemma4_12b_vlm_smpo.yaml"):
+    for name in (
+        "gemma4_12b_sft.yaml",
+        "gemma4_12b_vlm_smpo.yaml",
+        "gemma4_26b_a4b_sft.yaml",
+        "gemma4_26b_a4b_vlm_smpo.yaml",
+        "gemma4_31b_sft.yaml",
+        "gemma4_31b_vlm_smpo.yaml",
+    ):
         assert loaded[name]["attn_implementation"] == "sdpa"
-        assert loaded[name]["lora_target_modules"] == "all-linear"
         assert loaded[name]["force_chat_template"] is True
-    for name in ("gemma4_12b_vlm_smpo.yaml", "inkling2_small_vlm_smpo.yaml"):
+        assert loaded[name]["gradient_checkpointing"] is True
+    for name in ("gemma4_12b_sft.yaml", "gemma4_12b_vlm_smpo.yaml", "gemma4_31b_sft.yaml", "gemma4_31b_vlm_smpo.yaml"):
+        assert loaded[name]["lora_target_modules"] == "all-linear"
+    for name in ("gemma4_26b_a4b_sft.yaml", "gemma4_26b_a4b_vlm_smpo.yaml"):
+        assert loaded[name]["expert_parallel_size"] == 8
+        assert loaded[name]["moe_balancing"] == "none"
+        assert loaded[name]["use_peft"] is False
+    for name in (
+        "gemma4_12b_vlm_smpo.yaml",
+        "gemma4_26b_a4b_vlm_smpo.yaml",
+        "gemma4_31b_vlm_smpo.yaml",
+        "inkling2_small_vlm_smpo.yaml",
+    ):
         cfg = loaded[name]
         assert cfg["loss_type"] == "smooth_lower_bound"
         assert cfg["use_margin_schedule"] is True
+        assert cfg["chosen_sft_ratio"] == 1.0
         assert "images_field" not in cfg
         assert "truncation_mode" not in cfg
         assert cfg.get("freeze_vision_tower") is not True
-        assert cfg["lora_dropout"] == 0.0
+        if cfg.get("use_peft"):
+            assert cfg["lora_dropout"] == 0.0
         assert float(cfg["learning_rate"]) <= 5.0e-6
 
     for name in (

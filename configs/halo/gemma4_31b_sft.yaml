@@ -1,0 +1,57 @@
+# Halo VLM SFT — Gemma-4 31B-IT Dense (pinned rev 842da3794eaa0b77d5f08bae87a17459d91ff475).
+# Memory note: ~62 GB BF16 base weights alone; target 1x H200/B200 (141/192 GB) or multi-GPU FSDP
+# with reshard_after_forward (ZeRO-2 alone does not shard base weights on 80 GB cards).
+
+# --- Model ---
+model_name_or_path: google/gemma-4-31B-it
+attn_implementation: sdpa
+bf16: true
+
+# --- Dataset (CC-BY-4.0 / Public Domain save_to_disk Arrow dataset or HF Hub repo) ---
+dataset:
+  - data/halo_vlm_sft
+conversation_field: messages
+images_field: images
+
+# --- Sequence budget & VLM constraints ---
+packing: false
+max_length: 4096
+
+# --- Tokens & chat template ---
+train_on_completions_only: true
+chat_template: configs/halo/templates/gemma4_htr_nothink.jinja
+force_chat_template: true
+assistant_message_template: "<|turn>model\n<|channel>thought\n<channel|>"
+pad_token: <pad>
+
+# --- PEFT ---
+use_peft: true
+lora_r: 16
+lora_alpha: 32
+lora_dropout: 0.05
+lora_target_modules: all-linear
+
+# --- Training ---
+num_train_epochs: 1.5
+per_device_train_batch_size: 1
+per_device_eval_batch_size: 1
+gradient_accumulation_steps: 4
+learning_rate: 1.0e-4
+lr_scheduler_type: cosine
+warmup_steps: 0.05
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  use_reentrant: false
+
+# --- Checkpointing & logging ---
+output_dir: checkpoints/gemma4-31b-eahtr-sft
+eval_strategy: steps
+eval_steps: 50
+save_steps: 50
+save_total_limit: 2
+save_only_model: true
+logging_steps: 1
+logging_first_step: true
+log_decoded_samples: true
+remove_unused_columns: false
+dataloader_num_workers: 2

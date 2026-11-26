@@ -8,14 +8,14 @@ without external dependencies. Tier 2 imports an external whitecircle/halo check
 from __future__ import annotations
 
 import importlib
-import importlib.util
 from pathlib import Path
 import re
 import sys
-import types
 from typing import Any
 
 import yaml
+
+from ._halo_cpu_stubs import install_cpu_gpu_stubs, make_cpu_trainer_stub, restore_modules
 
 REFUSED_STARTUP_KEYS: frozenset[str] = frozenset(
     {
@@ -92,9 +92,37 @@ def _validate_single_tier1(yaml_path: Path, repo_root: Path) -> dict[str, Any]:
             raise ValueError(f"{yaml_path.name}: lora_r must be divisible by 8 under EP > 1")
 
     name = yaml_path.name
-    if "inkling2" in name and cfg.get("pad_token") != "<|endoftext|>":
+    name_low = name.lower()
+    model_low = str(cfg.get("model_name_or_path") or "").lower()
+    tpl_low = str(cfg.get("chat_template") or "").lower()
+    out_low = str(cfg.get("output_dir") or "").lower()
+    is_smpo = "_smpo" in name_low or cfg.get("loss_type") == "smooth_lower_bound"
+    is_gemma4 = (
+        "gemma-4" in model_low or "gemma4" in model_low or "gemma4" in name_low or "gemma4" in tpl_low or "gemma4" in out_low
+    )
+    is_gemma4_moe = is_gemma4 and ("a4b" in model_low or "a4b" in name_low or ep_size > 1)
+    is_inkling2 = "inkling" in model_low or "inkling2" in name_low or "inkling2" in tpl_low or "inkling2" in out_low
+    is_inkling2_small = is_inkling2 and (
+        "small" in model_low or name_low.startswith("inkling2_small_") or cfg.get("frozen_quantized_experts") is True
+    )
+    is_vlm = bool(cfg.get("images_field")) or "_vlm_smpo" in name_low or (is_smpo and (is_gemma4 or is_inkling2))
+
+    if is_gemma4 and cfg.get("attn_implementation") != "sdpa":
+        raise ValueError(f"{name}: Gemma 4 configs must set attn_implementation: sdpa (global_head_dim=512)")
+    if is_gemma4_moe:
+        if cfg.get("fp32_non_ep_params") is True:
+            raise ValueError(f"{name}: Gemma 4 MoE forbids fp32_non_ep_params: true under EP")
+        if cfg.get("moe_balancing") != "none":
+            raise ValueError(f"{name}: Gemma 4 MoE requires moe_balancing: none")
+    if is_vlm:
+        if cfg.get("packing") is True:
+            raise ValueError(f"{name}: VLM configs forbid packing: true")
+        if cfg.get("padding_free") is True:
+            raise ValueError(f"{name}: VLM configs forbid padding_free: true")
+
+    if is_inkling2 and cfg.get("pad_token") != "<|endoftext|>":
         raise ValueError(f"{name}: Inkling 2 configs must set pad_token: '<|endoftext|>'")
-    if name.startswith("inkling2_small_"):
+    if is_inkling2_small:
         if ep_size < 2:
             raise ValueError(f"{name}: Inkling-2-Small requires expert_parallel_size >= 2")
         if cfg.get("frozen_quantized_experts") is not True:
@@ -103,7 +131,7 @@ def _validate_single_tier1(yaml_path: Path, repo_root: Path) -> dict[str, Any]:
         if "o_proj" not in targets:
             raise ValueError(f"{name}: Inkling-2-Small requires o_proj alongside expert LoRA targets")
 
-    if "_smpo" in name or cfg.get("loss_type") == "smooth_lower_bound":
+    if is_smpo:
         if cfg.get("loss_type") != "smooth_lower_bound":
             raise ValueError(f"{name}: expected loss_type: smooth_lower_bound")
         if cfg.get("use_margin_schedule") is not True:
@@ -120,7 +148,7 @@ def _validate_single_tier1(yaml_path: Path, repo_root: Path) -> dict[str, Any]:
         if float(cfg.get("chosen_sft_ratio", 0.0)) != 1.0:
             raise ValueError(f"{name}: SMPO requires chosen_sft_ratio: 1.0")
 
-    if name == "archival_grpo_online.yaml":
+    if name == "archival_grpo_online.yaml" or "rewards" in cfg:
         if "gradient_checkpointing_kwargs" in cfg and cfg.get("gradient_checkpointing") is not True:
             raise ValueError(f"{name}: gradient_checkpointing_kwargs requires gradient_checkpointing: true")
         for term in cfg.get("rewards") or []:
@@ -154,114 +182,6 @@ def _trainer_spec_for_config(name: str) -> str:
     raise ValueError(f"Unrecognized Halo trainer family for config {name!r}")
 
 
-def _install_cpu_gpu_stubs() -> dict[str, Any]:
-    """Register minimal stubs for absent CUDA-only packages during CPU config parsing."""
-    class _DummySymbol:
-        def __init__(self, *args: Any, **kwargs: Any) -> None:
-            pass
-
-        def __call__(self, *args: Any, **kwargs: Any) -> "_DummySymbol":
-            return self
-
-    class _FlexMod(types.ModuleType):
-        def __init__(self, name: str) -> None:
-            super().__init__(name)
-            self.__path__ = []
-
-        def __getattr__(self, name: str) -> Any:
-            if name.startswith("__") and name.endswith("__"):
-                raise AttributeError(name)
-            return _DummySymbol
-
-    modules: dict[str, Any] = {}
-    if importlib.util.find_spec("triton") is None:
-        noop = lambda *a, **kw: a[0] if len(a) == 1 and callable(a[0]) and not kw else (lambda fn: fn)
-        triton = _FlexMod("triton")
-        for attr in ("jit", "autotune", "heuristics", "constexpr_function"):
-            setattr(triton, attr, noop)
-        triton.cdiv = lambda a, b: (a + b - 1) // b
-        triton.next_power_of_2 = lambda n: 1 << (n - 1).bit_length() if n > 0 else 1
-        t_subs = (
-            "triton.language", "triton.language.extra", "triton.language.extra.libdevice",
-            "triton.runtime", "triton.runtime.jit", "triton.runtime.autotuner",
-            "triton.errors", "triton.compiler", "triton.backends",
-        )
-        modules.update({"triton": triton, **{s: _FlexMod(s) for s in t_subs}})
-        triton.language, triton.runtime, triton.errors = (
-            modules["triton.language"], modules["triton.runtime"], modules["triton.errors"],
-        )
-        modules["triton.language.extra.libdevice"].tanh = lambda x: x
-        modules["triton.runtime.jit"].JITFunction = type("JITFunction", (), {})
-        modules["triton.runtime.autotuner"].Autotuner = type("Autotuner", (), {})
-        modules["triton.errors"].TritonError = type("TritonError", (Exception,), {})
-    if importlib.util.find_spec("fla") is None:
-        modules.update({"fla": _FlexMod("fla"), "fla.modules": _FlexMod("fla.modules")})
-    if importlib.util.find_spec("liger_kernel") is None:
-        l_subs = (
-            "liger_kernel", "liger_kernel.transformers", "liger_kernel.transformers.functional",
-            "liger_kernel.transformers.model", "liger_kernel.transformers.model.loss_utils",
-            "liger_kernel.transformers.model.output_classes", "liger_kernel.transformers.rope",
-            "liger_kernel.transformers.auto_model", "liger_kernel.ops",
-        )
-        modules.update({s: _FlexMod(s) for s in l_subs})
-        _noop_applier = lambda *a, **kw: None
-        modules["liger_kernel.transformers.auto_model"].MODEL_TYPE_TO_APPLY_LIGER_FN = type(
-            "_LigerMap", (dict,), {"get": lambda self, k, d=None: _noop_applier}
-        )()
-
-    saved = {k: sys.modules.get(k) for k in modules}
-    sys.modules.update(modules)
-    return saved
-
-
-def _restore_modules(saved: dict[str, Any]) -> None:
-    for key, orig in saved.items():
-        if orig is None:
-            sys.modules.pop(key, None)
-        else:
-            sys.modules[key] = orig
-
-
-def _make_cpu_trainer_stub(
-    cls_name: str,
-    bounded_row_length_fn: Any,
-    *,
-    supports_cp: bool,
-    pp_refusal: str | None,
-    supports_lowp: bool,
-    forward_rows: int,
-    generation_shaped: bool,
-) -> type:
-    class _CPUTraitDescriptor:
-        SUPPORTS_CP = supports_cp
-        PP_REFUSAL = pp_refusal
-        SUPPORTS_LOWP_PRECISION = supports_lowp
-        FORWARD_ROWS_PER_EXAMPLE = forward_rows
-        GENERATION_SHAPED_ROWS = generation_shaped
-
-        @classmethod
-        def declared_row_length(cls, training_config: Any, *sources: Any) -> int | None:
-            return bounded_row_length_fn(training_config, *sources)
-
-        @classmethod
-        def reject_undeclared_axes(cls, *, cp_size: int, pp_size: int) -> None:
-            if cp_size > 1 and not cls.SUPPORTS_CP:
-                raise ValueError(
-                    f"{cls.__name__} does not support Context Parallelism (CP). Use Expert Parallelism (EP) "
-                    "and/or Tensor Parallelism (TP) instead, or remove context_parallel_size."
-                )
-            if pp_size > 1 and cls.PP_REFUSAL is not None:
-                raise ValueError(
-                    f"{cls.__name__} does not support Pipeline Parallelism (PP): {cls.PP_REFUSAL}. "
-                    "Use Expert Parallelism (EP) and/or Tensor Parallelism (TP) instead, or remove "
-                    "pipeline_parallel_size."
-                )
-
-    _CPUTraitDescriptor.__name__ = cls_name
-    _CPUTraitDescriptor.__qualname__ = cls_name
-    return _CPUTraitDescriptor
-
-
 def _resolve_halo_imports() -> dict[str, Any]:
     try:
         trl = importlib.import_module("trl")
@@ -274,14 +194,14 @@ def _resolve_halo_imports() -> dict[str, Any]:
         sft_rules_mod = importlib.import_module("halo.trainers.sft_rules")
         ctx_win_mod = importlib.import_module("halo.models.introspection.context_window")
 
-        saved_gpu = _install_cpu_gpu_stubs()
+        saved_gpu = install_cpu_gpu_stubs()
         try:
             data_setup_mod = importlib.import_module("halo.entrypoints.data_setup")
             grpo_off_mod = importlib.import_module("halo.configs.grpo_offline")
             grpo_on_mod = importlib.import_module("halo.configs.grpo_online")
         finally:
             if saved_gpu:
-                _restore_modules(saved_gpu)
+                restore_modules(saved_gpu)
     except Exception as exc:
         raise RuntimeError(
             "Tier-2 Halo validation failed importing Halo modules/dependencies; ensure Python 3.12 "
@@ -289,10 +209,7 @@ def _resolve_halo_imports() -> dict[str, Any]:
             f"huggingface-hub, pyarrow, pillow, and wandb installed: {type(exc).__name__}: {exc}"
         ) from exc
 
-    _pp_online = (
-        "a pipeline stage holds only a contiguous subset of the layers, so this trainer's "
-        "loss cannot be expressed as a last-stage function of logits and labels"
-    )
+    _pp_online = "online GRPO requires full-model logits on a single stage."
     cpu_traits: dict[str, tuple[str, str, tuple[bool, str | None, bool, int, bool]]] = {
         "DistributedSFTTrainer": ("halo.trainers.sft", "DistributedSFTTrainer", (True, None, True, 1, False)),
         "SMPOTrainer": ("halo.trainers.preference.smpo", "SMPOTrainer", (True, None, False, 2, False)),
@@ -307,7 +224,7 @@ def _resolve_halo_imports() -> dict[str, Any]:
             resolved_trainers[key] = getattr(importlib.import_module(mod_path), cls_name)
         except (ImportError, TypeError):
             used_cpu_fallback = True
-            resolved_trainers[key] = _make_cpu_trainer_stub(
+            resolved_trainers[key] = make_cpu_trainer_stub(
                 cls_name,
                 ctx_win_mod.bounded_row_length,
                 supports_cp=s_cp,

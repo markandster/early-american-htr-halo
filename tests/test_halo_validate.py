@@ -28,7 +28,7 @@ def test_tier1_validator_passes_repo_configs() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     res = validate_yaml_configs_tier1(repo_root / "configs" / "halo", repo_root=repo_root)
     assert res["tier"] == 1
-    assert res["count"] == 7
+    assert res["count"] == 11
 
 
 def test_tier1_validator_rejects_yaml11_boolean_and_ep_all_linear(tmp_path: Path) -> None:
@@ -54,6 +54,44 @@ def test_tier1_validator_rejects_yaml11_boolean_and_ep_all_linear(tmp_path: Path
     )
     with pytest.raises(ValueError, match="chosen_sft_ratio: 1.0"):
         validate_yaml_configs_tier1(bad_smpo_dir, repo_root=tmp_path)
+
+    # Content-keyed checks must trigger even when generated YAMLs use arbitrary filenames
+    bad_moe_dir = tmp_path / "bad_moe"
+    bad_moe_dir.mkdir()
+    (bad_moe_dir / "run_custom_sft.yaml").write_text(
+        "model_name_or_path: google/gemma-4-26B-A4B-it\nbf16: true\nattn_implementation: sdpa\n"
+        "expert_parallel_size: 8\nfp32_non_ep_params: true\nmoe_balancing: none\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="fp32_non_ep_params"):
+        validate_yaml_configs_tier1(bad_moe_dir, repo_root=tmp_path)
+
+    bad_attn_dir = tmp_path / "bad_attn"
+    bad_attn_dir.mkdir()
+    (bad_attn_dir / "run_custom_sft.yaml").write_text(
+        "model_name_or_path: google/gemma-4-31B-it\nbf16: true\nattn_implementation: flash_attention_2\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="attn_implementation: sdpa"):
+        validate_yaml_configs_tier1(bad_attn_dir, repo_root=tmp_path)
+
+    bad_vlm_pack = tmp_path / "bad_vlm_pack"
+    bad_vlm_pack.mkdir()
+    (bad_vlm_pack / "run_custom_sft.yaml").write_text(
+        "model_name_or_path: google/gemma-4-12B-it\nbf16: true\nattn_implementation: sdpa\nimages_field: images\npacking: true\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="forbid packing: true"):
+        validate_yaml_configs_tier1(bad_vlm_pack, repo_root=tmp_path)
+
+    bad_ink_dir = tmp_path / "bad_ink"
+    bad_ink_dir.mkdir()
+    (bad_ink_dir / "run_custom_sft.yaml").write_text(
+        "model_name_or_path: thinkingmachines/Inkling-2-Small\nbf16: true\nexpert_parallel_size: 8\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="pad_token"):
+        validate_yaml_configs_tier1(bad_ink_dir, repo_root=tmp_path)
 
 
 def test_tier2_validator_fails_closed_on_missing_repo_and_surfaces_mocked_errors(
