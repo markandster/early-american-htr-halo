@@ -50,14 +50,41 @@ def test_score_pair_empty_reference_handling() -> None:
 def test_line_break_order_tolerant_and_bootstrap_ci() -> None:
     assert normalize_preserve_newlines("Line  one \r\n\nLine\t two") == "Line one\nLine two"
     exact = score_line_breaks("Line one\nLine two", "Line one\nLine two")
+    expected_keys = {
+        "newline_cer",
+        "line_boundary_f1",
+        "order_tolerant_cer",
+        "newline_char_edits",
+        "newline_ref_chars",
+        "matched_boundaries",
+        "pred_lines",
+        "ref_lines",
+        "order_tolerant_char_edits",
+        "order_tolerant_ref_chars",
+    }
+    assert set(exact) == expected_keys
     assert exact["newline_cer"] == 0.0
     assert exact["line_boundary_f1"] == 1.0
+    assert exact["matched_boundaries"] == 1
+
+    short = score_line_breaks("A\nB", "X\nB")
+    long_p = score_line_breaks("Dear Sir I remain\nyours", "Dear Sir I remain\nyours")
+    micro_nl = (short["newline_char_edits"] + long_p["newline_char_edits"]) / (
+        short["newline_ref_chars"] + long_p["newline_ref_chars"]
+    )
+    assert abs(micro_nl - (short["newline_cer"] + long_p["newline_cer"]) / 2.0) > 0.05
 
     reordered = score_line_breaks("Second block\nFirst block", "First block\nSecond block")
     assert reordered["order_tolerant_cer"] == 0.0
     assert reordered["newline_cer"] > 0.0
 
-    ci = paired_bootstrap_ci([-0.05, -0.04, -0.06, -0.03], ["doc1", "doc1", "doc2", "doc3"], n_boot=300, seed=7)
+    ci = paired_bootstrap_ci(
+        [-0.05, -0.04, -0.06, -0.03],
+        ["doc1", "doc1", "doc2", "doc3"],
+        weights=[100, 200, 50, 50],
+        n_boot=300,
+        seed=7,
+    )
     assert ci["mean"] < 0.0
     assert ci["ci_high"] < 0.0
     assert ci["n_clusters"] == 3.0

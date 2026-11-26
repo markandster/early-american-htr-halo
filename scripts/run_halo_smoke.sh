@@ -61,6 +61,7 @@ from datasets import load_from_disk
 from huggingface_hub import snapshot_download
 from transformers import AutoConfig, AutoProcessor, AutoTokenizer, GenerationConfig
 from halo.data.collators.vlm import VLMDataCollator
+from halo.data.pipeline.vlm_rows import build_vlm_row_processor
 from eahtr.candidates import REVCITY_ZENODO_URL
 from eahtr.halo_smoke import (
     build_smoke_yaml_configs,
@@ -73,18 +74,22 @@ from eahtr.halo_smoke import (
 work = Path("${WORK_DIR}")
 repo = Path("${REPO_ROOT}")
 vram_gb = float("${VRAM_GB}")
+records = fetch_revcity_smoke_sample(REVCITY_ZENODO_URL, work / "images", max_pages=32)
+assert len(records) >= 16, f"Expected >=16 smoke records via Range read, got {len(records)}"
+
 cache_dir = Path(snapshot_download(
     "google/gemma-4-12B-it",
     revision="${GEMMA4_12B_REV}",
     allow_patterns=["*.json", "*.jinja", "*.model", "*.safetensors*"],
 ))
 staged_dir = prepare_gemma4_highres_dir(cache_dir, work / "gemma4_12b_highres")
-records = fetch_revcity_smoke_sample(REVCITY_ZENODO_URL, work / "images", max_pages=32)
-assert len(records) >= 16, f"Expected >=16 smoke records via Range read, got {len(records)}"
 
 proc = AutoProcessor.from_pretrained(str(staged_dir))
 realized_toks = verify_processor_image_tokens(proc, Path(records[0]["image_path"]))
 tok = getattr(proc, "tokenizer", None) or AutoTokenizer.from_pretrained(str(staged_dir))
+htr_tpl = (repo / "configs" / "halo" / "templates" / "gemma4_htr_nothink.jinja").read_text(encoding="utf-8")
+proc.chat_template = htr_tpl
+tok.chat_template = htr_tpl
 max_len = 2048 if vram_gb < 32.0 else 4096
 max_prompt = 1350 if vram_gb < 32.0 else 1600
 sft_ds, smpo_ds, dropped = export_halo_vlm_smoke_datasets(
@@ -99,7 +104,8 @@ collator = VLMDataCollator(
     model_config=AutoConfig.from_pretrained(str(staged_dir)),
     generation_config=GenerationConfig.from_pretrained(str(staged_dir)),
 )
-batch0 = collator([{"history": ds["train"][0]["messages"], "images": ds["train"][0]["images"]}])
+row0_norm = build_vlm_row_processor("messages", images_field="images")(ds["train"][0])
+batch0 = collator([row0_norm])
 img_tid = getattr(tok, "image_token_id", None) or tok.get_vocab()["<|image|>"]
 b0_img = int((batch0["input_ids"][0] == img_tid).sum().item())
 assert 281 <= b0_img <= 1120, f"Collated batch-0 image token collapse: {b0_img}"
@@ -141,16 +147,26 @@ from eahtr.candidates import DIPLOMATIC_PROMPT
 from eahtr.halo_smoke import verify_stage_continuity_logprobs
 
 work = Path("${WORK_DIR}")
-ds = load_from_disk(str(work / "datasets" / "sft"))["train"]
+sft_ds_path = work / "datasets" / "halo_vlm_sft_smoke"
+ds = load_from_disk(str(sft_ds_path))["train"]
 row0 = ds[0]
 img = row0["images"][0].convert("RGB")
 ref_text = row0["messages"][1]["content"][0]["text"]
 
 adapter_st = load_file(str(Path("${RESOLVED_SFT_ADAPTER}") / "adapter_model.safetensors"))
-vision_deltas = [v.float().abs().max().item() for k, v in adapter_st.items() if "vision" in k]
-assert vision_deltas and max(vision_deltas) > 0.0, "Stage 1 Halo SFT recorded zero vision parameter updates"
+vision_deltas = [
+    v.float().abs().max().item()
+    for k, v in adapter_st.items()
+    if any(t in k for t in ("vision", "embed_vision", "projector")) and ("lora_B." in k or "modules_to_save" in k)
+]
+assert vision_deltas and max(vision_deltas) > 0.0, "Stage 1 Halo SFT recorded zero vision lora_B/modules_to_save updates"
 
-bnb_cfg = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_use_double_quant=True, bnb_4bit_compute_dtype=torch.bfloat16)
+vram_gb = float("${VRAM_GB}")
+bnb_cfg = (
+    BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_use_double_quant=True, bnb_4bit_compute_dtype=torch.bfloat16)
+    if vram_gb < 56.0
+    else None
+)
 
 def _score_mean_lp(model_path: Path, check_generate: bool = False) -> list[float]:
     proc = AutoProcessor.from_pretrained(str(model_path))
@@ -161,9 +177,10 @@ def _score_mean_lp(model_path: Path, check_generate: bool = False) -> list[float
     full = prompt + ref_text + "<turn|>"
     p_in = proc(text=[prompt], images=[img], return_tensors="pt")
     f_in = proc(text=[full], images=[img], return_tensors="pt")
-    mdl = AutoModelForImageTextToText.from_pretrained(
-        str(model_path), torch_dtype=torch.bfloat16, device_map="auto", attn_implementation="sdpa", quantization_config=bnb_cfg,
-    )
+    load_kw = {"torch_dtype": torch.bfloat16, "device_map": "auto", "attn_implementation": "sdpa"}
+    if bnb_cfg is not None:
+        load_kw["quantization_config"] = bnb_cfg
+    mdl = AutoModelForImageTextToText.from_pretrained(str(model_path), **load_kw)
     mdl.eval()
     with torch.no_grad():
         dev_in = {k: v.to(mdl.device) if torch.is_tensor(v) else v for k, v in f_in.items()}
@@ -173,8 +190,12 @@ def _score_mean_lp(model_path: Path, check_generate: bool = False) -> list[float
         lps = torch.log_softmax(logits[p_len - 1 : -1].float(), dim=-1).gather(-1, tgt.unsqueeze(-1)).squeeze(-1)
         if check_generate:
             out = mdl.generate(**{k: v.to(mdl.device) if torch.is_tensor(v) else v for k, v in p_in.items()}, max_new_tokens=128, do_sample=False)
-            decoded = proc.batch_decode(out[:, p_len:], skip_special_tokens=False)[0]
+            gen_ids = out[:, p_len:]
+            decoded = proc.batch_decode(gen_ids, skip_special_tokens=False)[0]
             assert "<|channel>thought" not in decoded, f"Thinking leak in Stage 1 smoke generate: {decoded[:120]}"
+            tok = getattr(proc, "tokenizer", proc)
+            eot_id = tok.convert_tokens_to_ids("<turn|>")
+            assert int(gen_ids.shape[1]) < 128 or eot_id in gen_ids[0].tolist(), "Stage 1 smoke generate hit 128-token cap without stopping"
     del mdl
     torch.cuda.empty_cache()
     return [float(x) for x in lps[:16].cpu().tolist()]
@@ -211,7 +232,7 @@ if peft_cfg is not None:
     mdl = get_peft_model(mdl, peft_cfg)
 apply_vision_options(s_args, mdl, m_cfg, policy.processing_class, is_vlm=is_vlm_s)
 proc = policy.processing_class
-row0 = load_from_disk(str(work / "datasets" / "sft"))["train"][0]
+row0 = load_from_disk(str(work / "datasets" / "halo_vlm_sft_smoke"))["train"][0]
 img = row0["images"][0].convert("RGB")
 ref_text = row0["messages"][1]["content"][0]["text"]
 prompt = proc.apply_chat_template([{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": DIPLOMATIC_PROMPT}]}], tokenize=False, add_generation_prompt=True)

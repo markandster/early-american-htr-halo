@@ -105,33 +105,71 @@ if INCLUDE_REVCITY:
         paired_stems = sorted(s for s, d in by_stem.items() if 'img' in d and 'xml' in d)
         print(f'Scanning all {len(paired_stems)} paired (JPG/PNG + ALTO-XML) pages in Zenodo 15776323 (CC-BY-4.0)')
 
-        # Assign item/recto-verso groups and deterministic splits BEFORE any smoke subsampling
-        item_groups = assign_revcity_item_groups(paired_stems, max_id_gap=1, creator_map=creator_map or None)
-        split_buckets = {'train': [], 'val': [], 'test_public': []}
+        # Assign volume/item groups (max_id_gap=5) & merge exact/n-gram linked keys before splitting
+        item_groups = assign_revcity_item_groups(paired_stems, max_id_gap=5, creator_map=creator_map or None)
+        admitted_items = []
         for stem in paired_stems:
             entry = by_stem[stem]
             xml_str = zf.read(entry['xml']).decode('utf-8', errors='replace')
             try:
-                lines = parse_alto_xml_lines(xml_str, sort_regions=True)
+                lines = parse_alto_xml_lines(xml_str, sort_regions=False)
             except Exception:
                 corpus_report['revcity_xml_parse_error'] += 1
                 continue
             raw_text = '\\n'.join(lines)
             accepted, reason = filter_corpus_record({'source_name': 'Revolutionary City', 'license': 'CC-BY-4.0', 'text': raw_text})
             cleaned_text = clean_diplomatic_target(raw_text)
+            info = item_groups.get(stem, {})
+            safe_id = info.get('safe_id') or stem.replace('%3A', '_')
             if not accepted or len(cleaned_text.split()) < 8:
                 drop_tag = reason if not accepted else 'dropped_under_8_words'
                 corpus_report[f'revcity_{drop_tag}'] += 1
-                hard_case_rows.append({'record_id': f'revcity-{stem}', 'reason': drop_tag, 'raw_text': raw_text})
+                img_ext = Path(entry['img']).suffix.lower()
+                hc_img = rc_pages / f'hard_{safe_id}{img_ext}'
+                if not hc_img.exists():
+                    hc_img.write_bytes(zf.read(entry['img']))
+                hard_case_rows.append({
+                    'record_id': f'revcity-{safe_id}',
+                    'document_id': info.get('document_id') or f'revcity:{safe_id}',
+                    'writer_key': info.get('writer_key') or f'unattributed_item:{safe_id}',
+                    'image_path': str(hc_img),
+                    'reason': drop_tag,
+                    'raw_text': raw_text,
+                    'text': cleaned_text or raw_text,
+                })
                 continue
+            base_key = info['writer_key'] if info.get('hand_attributed') == 'true' else (info.get('document_id') or f'revcity:{safe_id}')
+            admitted_items.append((stem, safe_id, entry['img'], xml_str, raw_text, cleaned_text, info, base_key))
 
-            info = item_groups.get(stem, {})
-            safe_id = info.get('safe_id') or stem.replace('%3A', '_')
-            doc_id = info.get('document_id') or f'revcity:{safe_id}'
+        # Union-find transitive closure across 32-gram & >=8-word exact-text matches so related docs never straddle splits
+        uf_parent = {it[7]: it[7] for it in admitted_items}
+        def _uf_find(k):
+            while uf_parent[k] != k:
+                uf_parent[k] = uf_parent[uf_parent[k]]
+                k = uf_parent[k]
+            return k
+        def _uf_union(a, b):
+            ra, rb = _uf_find(a), _uf_find(b)
+            if ra != rb:
+                uf_parent[max(ra, rb)] = min(ra, rb)
+        seen_sig = {}
+        for _, _, _, _, _, c_txt, _, b_key in admitted_items:
+            sigs = set(extract_word_ngrams(c_txt, n=32))
+            words_norm = ' '.join(c_txt.lower().split())
+            if len(words_norm.split()) >= 8:
+                sigs.add('exact:' + hashlib.sha256(words_norm.encode('utf-8')).hexdigest())
+            for sig in sigs:
+                if sig in seen_sig:
+                    _uf_union(seen_sig[sig], b_key)
+                else:
+                    seen_sig[sig] = b_key
+
+        split_buckets = {'train': [], 'val': [], 'test_public': []}
+        for stem, safe_id, img_m, xml_str, raw_text, cleaned_text, info, base_key in admitted_items:
             split = assign_deterministic_split(
-                f'revcity:{doc_id}', val_fraction=VAL_FRACTION, test_fraction=TEST_FRACTION
+                f'revcity:{_uf_find(base_key)}', val_fraction=VAL_FRACTION, test_fraction=TEST_FRACTION
             )
-            split_buckets[split].append((stem, safe_id, entry['img'], xml_str, raw_text, cleaned_text, info))
+            split_buckets[split].append((stem, safe_id, img_m, xml_str, raw_text, cleaned_text, info))
 
         if REVCITY_MAX_PAGES is not None:
             split_buckets = _stratified_smoke_slice(split_buckets, REVCITY_MAX_PAGES, SEED)
@@ -270,13 +308,18 @@ audit_summary = {
     'splits': {k: _split_stats(v) for k, v in all_records_by_split.items()},
     'hard_case_panel_pages': len(hard_case_rows),
     'challenge_loc_pages': len(loc_challenge_rows),
+    'dhash_review_candidates': (
+        val_audit['perceptual_image_collisions']
+        + test_audit['perceptual_image_collisions']
+        + val_test_audit['perceptual_image_collisions']
+    ),
     'val_disjoint_audit': val_audit,
     'test_disjoint_audit': test_audit,
     'val_test_disjoint_audit': val_test_audit,
 }
 (OUTPUT_ROOT / 'corpus_audit_report.json').write_text(json.dumps(audit_summary, indent=2), encoding='utf-8')
 print(json.dumps(audit_summary['splits'], indent=2))
-print('Disjointness checks (doc, group, sha256, dHash, 32-gram) PASSED.')
+print('Disjointness checks (doc, group, sha256, exact, 32-gram) PASSED; dHash review candidates:', len(audit_summary['dhash_review_candidates']))
 
 if PUBLISH_TO_HF_DATASET:
     print(f'Publishing validated public splits to Hugging Face Hub: {HF_DATASET_REPO_ID} ...')

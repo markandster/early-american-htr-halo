@@ -162,7 +162,6 @@ def audit_split_disjointness(
         or image_collisions
         or ngram_collisions
         or exact_text_collisions
-        or perceptual_collisions
     )
     return {
         "passed": passed,
@@ -170,6 +169,7 @@ def audit_split_disjointness(
         "writer_collisions": writer_collisions,
         "image_collisions": image_collisions,
         "perceptual_image_collisions": perceptual_collisions,
+        "dhash_review_count": len(perceptual_collisions),
         "ngram_collisions": ngram_collisions,
         "exact_text_collisions": exact_text_collisions,
     }

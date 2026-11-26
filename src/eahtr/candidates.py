@@ -209,6 +209,7 @@ def assign_deterministic_split(
 
 
 _REVCITY_STEM_RE = re.compile(r"^([A-Za-z]+)(?:%3A|_|:)(\d+)(?:_[A-Za-z0-9]+)?$")
+_HYPHEN_MANUSCRIPT_RE = re.compile(r"^([A-Za-z0-9_]+)-\d+(?:_[A-Za-z0-9]+)?$")
 
 
 def parse_revcity_stem_id(stem_name: str) -> tuple[str, int | None, str]:
@@ -225,14 +226,10 @@ def parse_revcity_stem_id(stem_name: str) -> tuple[str, int | None, str]:
 def assign_revcity_item_groups(
     stems: Sequence[str],
     *,
-    max_id_gap: int = 1,
+    max_id_gap: int = 5,
     creator_map: Mapping[str, str] | None = None,
 ) -> dict[str, dict[str, str]]:
-    """Group RevCity pages by consecutive numeric ID runs per institution to keep multi-page items together.
-
-    When archival creator metadata is supplied via ``creator_map``, uses attributed scribal hand
-    as ``writer_key``; otherwise emits an unattributed item-scoped key so hand claims stay bounded.
-    """
+    """Group RevCity pages by consecutive numeric ID runs (or hyphenated ms prefixes) per institution."""
     parsed = [(stem, *parse_revcity_stem_id(stem)) for stem in stems]
     numeric_entries = sorted(
         [(inst, num, safe_id, stem) for stem, inst, num, safe_id in parsed if num is not None],
@@ -278,7 +275,8 @@ def assign_revcity_item_groups(
 
     for stem, inst, num, safe_id in parsed:
         if num is None:
-            group_id = f"{inst}:stem_{safe_id}"
+            ms_match = _HYPHEN_MANUSCRIPT_RE.match(safe_id)
+            group_id = f"{inst}:ms_{ms_match.group(1)}" if ms_match else f"{inst}:stem_{safe_id}"
             creator = (creator_map or {}).get(safe_id) or (creator_map or {}).get(stem)
             writer_key = (
                 f"scribed_hand:{creator.strip()}"

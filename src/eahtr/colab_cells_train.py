@@ -114,8 +114,8 @@ def _build_arm_cache_key(cand_key: str, arm: str, spec, train_rows: list[dict], 
         'cand': cand_key, 'hf_repo': spec.hf_repo, 'arm': arm, 'smoke': SMOKE_TEST_MODE,
         'ep': EPOCHS, 'r': LORA_RANK, 'lr': LEARNING_RATE, 'vlr': VISION_LR, 'seq': MAX_SEQ_LEN,
         'max_new': MAX_EVAL_NEW_TOKENS, 'seed': SEED, 'freeze_eval': FINAL_FREEZE_EVAL_TEST_PUBLIC,
-        'train_ids': [r['record_id'] for r in train_rows[:64]] + [len(train_rows)],
-        'eval_ids': [r['record_id'] for r in eval_rows],
+        'train_sig': [[r.get('record_id', ''), r.get('image_sha256', '')] for r in train_rows],
+        'eval_sig': [[r.get('record_id', ''), r.get('image_sha256', '')] for r in eval_rows],
     }
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode('utf-8')).hexdigest()[:16]
 
@@ -125,8 +125,10 @@ def run_candidate_arm(cand_key: str, arm: str, arm_train_rows: list[dict], val_s
     eval_target = test_slice if (FINAL_FREEZE_EVAL_TEST_PUBLIC and test_slice) else val_slice
     eval_split_name = 'public_test' if (FINAL_FREEZE_EVAL_TEST_PUBLIC and test_slice) else 'val'
     out_dir = OUTPUT_ROOT / f'{cand_key}-{arm}'
-    out_dir.mkdir(parents=True, exist_ok=True)
     cache_key = _build_arm_cache_key(cand_key, arm, spec, arm_train_rows, eval_target)
+    run_dir = out_dir / cache_key
+    out_dir.mkdir(parents=True, exist_ok=True)
+    run_dir.mkdir(parents=True, exist_ok=True)
     score_file = out_dir / f'{eval_split_name}_eval_scores_{cache_key}.json'
     if score_file.is_file():
         print(f'[SKIP] Cache hit {cand_key}-{arm} ({cache_key}): {score_file}')
@@ -249,6 +251,7 @@ def run_candidate_arm(cand_key: str, arm: str, arm_train_rows: list[dict], val_s
     best_trainable_state = None
     train_log = []
     skipped_oom = 0
+    discarded_oom_microbatches = 0
     skipped_overlength = 0
     verified_step1_grads = False
     realized_image_tokens = None
@@ -293,6 +296,7 @@ def run_candidate_arm(cand_key: str, arm: str, arm_train_rows: list[dict], val_s
                 accum_count += 1
             except torch.cuda.OutOfMemoryError:
                 skipped_oom += 1
+                discarded_oom_microbatches += accum_count
                 optimizer.zero_grad(set_to_none=True)
                 accum_count = 0
                 torch.cuda.empty_cache()
@@ -336,7 +340,7 @@ def run_candidate_arm(cand_key: str, arm: str, arm_train_rows: list[dict], val_s
             best_val_cer = val_cer
             best_epoch = epoch
             best_trainable_state = {n: p.detach().cpu().clone() for n, p in model.named_parameters() if p.requires_grad}
-            adapter_dir = out_dir / 'adapter_best'
+            adapter_dir = run_dir / 'adapter_best'
             model.save_pretrained(adapter_dir)
             processor.save_pretrained(adapter_dir)
 
@@ -363,7 +367,7 @@ def run_candidate_arm(cand_key: str, arm: str, arm_train_rows: list[dict], val_s
         swap_delta = round(swap_eval['scores']['strict_cer_pct'] - matched_sub, 2)
         print(f'Image-swap check ({len(swap_subset)} pages): swap CER={swap_eval["scores"]["strict_cer_pct"]}% (delta={swap_delta:+.2f} pp)')
 
-    merged_dir = out_dir / 'merged_hf'
+    merged_dir = run_dir / 'merged_hf'
     merged_dir_str = None
     if not use_4bit:
         merged_model = model.merge_and_unload()
@@ -383,14 +387,14 @@ def run_candidate_arm(cand_key: str, arm: str, arm_train_rows: list[dict], val_s
         if host_ram_gb is not None and spec.params_b * 3.0 > host_ram_gb:
             print(
                 f'[SKIP MERGE] Host RAM {host_ram_gb:.1f} GB < ~{spec.params_b * 3.0:.0f} GB needed for CPU BF16 merge of {spec.hf_repo}; '
-                f'adapter saved at {out_dir / "adapter_best"}. Use Halo merge_peft_adapters.py (without --device_map or --fp32_norms) on a High-RAM/GPU host.'
+                f'adapter saved at {run_dir / "adapter_best"}. Use Halo merge_peft_adapters.py (without --device_map or --fp32_norms) on a High-RAM/GPU host.'
             )
         else:
             cpu_base = load_vlm_model(
                 spec.hf_repo,
                 {'device_map': 'cpu', 'torch_dtype': torch.bfloat16, 'trust_remote_code': spec.trust_remote_code},
             )
-            merged_model = PeftModel.from_pretrained(cpu_base, str(out_dir / 'adapter_best')).merge_and_unload()
+            merged_model = PeftModel.from_pretrained(cpu_base, str(run_dir / 'adapter_best')).merge_and_unload()
             merged_model.save_pretrained(merged_dir, safe_serialization=True)
             processor.save_pretrained(merged_dir)
             del merged_model, cpu_base
@@ -410,13 +414,14 @@ def run_candidate_arm(cand_key: str, arm: str, arm_train_rows: list[dict], val_s
         'image_tokens_per_page': realized_image_tokens,
         'used_4bit_qlora': use_4bit,
         'skipped_overlength': skipped_overlength,
+        'discarded_oom_microbatches': discarded_oom_microbatches,
         'best_epoch': best_epoch,
         'train_log': train_log,
         'predictions_sha256': hashlib.sha256(pred_bytes).hexdigest(),
         'per_side_cer': [p['strict_cer'] for p in final_eval['predictions']],
         'swap_cer_degradation': swap_delta,
         'scores': final_eval['scores'],
-        'adapter_dir': str(out_dir / 'adapter_best'),
+        'adapter_dir': str(run_dir / 'adapter_best'),
         'merged_hf_dir': merged_dir_str,
     }
     score_file.write_text(json.dumps(payload, indent=2), encoding='utf-8')

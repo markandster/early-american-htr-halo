@@ -34,7 +34,7 @@ mkdir -p "${WORK_DIR}"
 python3 "${REPO_ROOT}/scripts/stage_gemma4_highres.py" \
   --model "${HF_REPO}" --revision "${HF_REV}" --out-dir "${STAGED_BASE}" --max-soft-tokens 1120
 
-RUN_YAML="${WORK_DIR}/run_${MODEL_SIZE}_${STAGE}.yaml"
+RUN_YAML="${WORK_DIR}/run_${MODEL_SIZE}_${STAGE/smpo/vlm_smpo}.yaml"
 SFT_MERGED_DIR="${SFT_MERGED_DIR:-${DEFAULT_SFT_MERGED}}"
 python3 - <<PY
 from pathlib import Path
@@ -55,7 +55,7 @@ TRAIN_SCRIPT="${HALO_DIR}/scripts/training/sft.py"
 
 LOG_FILE="${WORK_DIR}/run_${MODEL_SIZE}_${STAGE}.log"
 if [[ "${NUM_GPUS}" -gt 1 ]]; then
-  accelerate launch --num_processes "${NUM_GPUS}" "${TRAIN_SCRIPT}" "${RUN_YAML}" 2>&1 | tee "${LOG_FILE}"
+  torchrun --nproc_per_node="${NUM_GPUS}" "${TRAIN_SCRIPT}" "${RUN_YAML}" 2>&1 | tee "${LOG_FILE}"
 else
   python3 "${TRAIN_SCRIPT}" "${RUN_YAML}" 2>&1 | tee "${LOG_FILE}"
 fi

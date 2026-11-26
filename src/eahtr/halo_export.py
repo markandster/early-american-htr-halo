@@ -281,16 +281,15 @@ def verify_exported_vlm_dir(
         env.globals["raise_exception"] = lambda msg: (_ for _ in ()).throw(ValueError(msg))
         tpl = env.from_string(tpl_text)
         msg1 = [{"role": "user", "content": [{"type": "text", "text": "Transcribe."}]}]
-        msg2 = msg1 + [
-            {"role": "assistant", "content": [{"type": "text", "text": "Dear Sir"}]},
-            {"role": "user", "content": [{"type": "text", "text": "Next page."}]},
-        ]
+        msg_full = msg1 + [{"role": "assistant", "content": [{"type": "text", "text": "Dear Sir"}]}]
+        msg2 = msg_full + [{"role": "user", "content": [{"type": "text", "text": "Next page."}]}]
         r1 = tpl.render(messages=msg1, add_generation_prompt=True, enable_thinking=False, bos_token="", eos_token="", tools=None)
         r1_default = tpl.render(messages=msg1, add_generation_prompt=True, bos_token="", eos_token="", tools=None)
         r1_nogen = tpl.render(messages=msg1, add_generation_prompt=False, bos_token="", eos_token="", tools=None)
+        r_full = tpl.render(messages=msg_full, add_generation_prompt=False, bos_token="", eos_token="", tools=None)
         r2 = tpl.render(messages=msg2, add_generation_prompt=True, bos_token="", eos_token="", tools=None)
-        if not r2.startswith(r1_nogen) or r1 != r1_default:
-            raise ValueError(f"{model_dir}: chat template failed prefix-invariance or default-nothink parity")
+        if not r2.startswith(r1_nogen) or not r_full.startswith(r1) or r1 != r1_default:
+            raise ValueError(f"{model_dir}: chat template failed assistant-turn prefix invariance or default-nothink parity")
         if model_family == "gemma4" and ("<|turn>model" not in r1 or "<|channel>thought\n<channel|>" not in r1):
             raise ValueError(f"{model_dir}: rendered Gemma 4 template missing non-thinking <|channel>thought\\n<channel|> sentinel")
         if model_family == "inkling2" and (("Thinking effort level: 0<" not in r1 and "Thinking effort level: 0.0" not in r1) or "0.9" in r1):
@@ -303,9 +302,15 @@ def verify_exported_vlm_dir(
         ref_tok = AutoTokenizer.from_pretrained(str(reference_dir))
         exp_tok = AutoTokenizer.from_pretrained(str(model_dir))
         sample = [{"role": "user", "content": [{"type": "text", "text": "Transcribe."}]}]
+        sample_full = sample + [{"role": "assistant", "content": [{"type": "text", "text": "Dear Sir"}]}]
         if ref_tok.eos_token_id != exp_tok.eos_token_id:
             raise ValueError(f"{model_dir}: eos_token_id {exp_tok.eos_token_id} != reference {ref_tok.eos_token_id}")
-        if ref_tok.apply_chat_template(sample, tokenize=True, add_generation_prompt=True) != exp_tok.apply_chat_template(sample, tokenize=True, add_generation_prompt=True):
+        if (
+            ref_tok.apply_chat_template(sample, tokenize=True, add_generation_prompt=True)
+            != exp_tok.apply_chat_template(sample, tokenize=True, add_generation_prompt=True)
+            or ref_tok.apply_chat_template(sample_full, tokenize=True, add_generation_prompt=False)
+            != exp_tok.apply_chat_template(sample_full, tokenize=True, add_generation_prompt=False)
+        ):
             raise ValueError(f"{model_dir}: tokenized chat template diverged from {reference_dir}")
         checked_fields["reference_token_parity"] = True
 

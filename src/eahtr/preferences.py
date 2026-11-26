@@ -11,22 +11,6 @@ from .rewards import ArchivalRewardConfig, score_group_completions, score_transc
 DEFAULT_PREFERENCE_PROMPT = DIPLOMATIC_PROMPT
 
 
-def _max_ngram_repeat(tokens: list[str]) -> int:
-    best = 1
-    for ngram_len in (4, 3, 2):
-        for i in range(len(tokens)):
-            unit = tokens[i : i + ngram_len]
-            if len(unit) < ngram_len:
-                continue
-            reps = 1
-            pos = i + ngram_len
-            while tokens[pos : pos + ngram_len] == unit:
-                reps += 1
-                pos += ngram_len
-            best = max(best, reps)
-    return best
-
-
 def _passes_nonblank_positive_gate(
     completion: str,
     reference: str,
@@ -84,15 +68,14 @@ def build_preference_pairs(
         if not scored:
             continue
 
-        # Deduplicate rollouts after newline-preserving normalization (preventing duplicate text pairs)
+        # Deduplicate rollouts after newline-preserving normalization, retaining highest-reward representative
         dedup_best_by_text: dict[str, dict[str, object]] = {}
         for item in scored:
             norm_key = normalize_preserve_newlines(str(item["completion"]))
             prev = dedup_best_by_text.get(norm_key)
-            if prev is None or float(item["reward"]) < float(prev["reward"]):
+            if prev is None or float(item["reward"]) > float(prev["reward"]):
                 dedup_best_by_text[norm_key] = item
         unique_scored = list(dedup_best_by_text.values())
-        worst = min(unique_scored, key=lambda item: float(item["reward"]))
 
         sampled_sorted = sorted(unique_scored, key=lambda item: float(item["reward"]), reverse=True)
         qualifying_sampled = next(
@@ -127,9 +110,14 @@ def build_preference_pairs(
         else:
             continue
 
-        rejected_text = str(worst["completion"])
-        if normalize_preserve_newlines(chosen_text) == normalize_preserve_newlines(rejected_text):
+        chosen_norm = normalize_preserve_newlines(chosen_text)
+        neg_candidates = [
+            item for item in unique_scored if normalize_preserve_newlines(str(item["completion"])) != chosen_norm
+        ]
+        if not neg_candidates:
             continue
+        worst = min(neg_candidates, key=lambda item: float(item["reward"]))
+        rejected_text = str(worst["completion"])
 
         rejected_reward = float(worst["reward"])
         margin = chosen_reward - rejected_reward
@@ -140,26 +128,27 @@ def build_preference_pairs(
         rej_loop = bool(worst.get("loop_detected"))
         cap_val = int(max_new_tokens_cap or rec.get("max_new_tokens_cap") or 0)
         rej_toks = count_tokens_fn(rejected_text) if count_tokens_fn is not None else len(rejected_text.split())
-        ref_toks = count_tokens_fn(reference) if count_tokens_fn is not None else len(reference.split())
-        budget_censored = (rej_fr == "length") and not rej_loop and (cap_val > 0 and ref_toks >= int(0.85 * cap_val))
+        budget_censored = (rej_fr == "length") and not rej_loop
 
         row_prompt = str(rec.get("prompt") or prompt_text)
-        pairs.append(
-            {
-                "record_id": str(rec.get("record_id", "")),
-                "images": [image_path],
-                "prompt": [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": row_prompt}]}],
-                "chosen": [{"role": "assistant", "content": chosen_text}],
-                "rejected": [{"role": "assistant", "content": rejected_text}],
-                "chosen_reward": round(chosen_reward, 6),
-                "rejected_reward": round(rejected_reward, 6),
-                "margin": round(margin, 6),
-                "chosen_source": chosen_source,
-                "rejected_finish_reason": rej_fr,
-                "rejected_is_loop": rej_loop,
-                "rejected_is_budget_capped": budget_censored,
-                "max_new_tokens_cap": cap_val,
-                "rejected_tokens": rej_toks,
-            }
-        )
+        pair: dict[str, object] = {
+            "record_id": str(rec.get("record_id", "")),
+            "images": [image_path],
+            "prompt": [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": row_prompt}]}],
+            "chosen": [{"role": "assistant", "content": chosen_text}],
+            "rejected": [{"role": "assistant", "content": rejected_text}],
+            "chosen_reward": round(chosen_reward, 6),
+            "rejected_reward": round(rejected_reward, 6),
+            "margin": round(margin, 6),
+            "chosen_source": chosen_source,
+            "rejected_finish_reason": rej_fr,
+            "rejected_is_loop": rej_loop,
+            "rejected_is_budget_capped": budget_censored,
+            "max_new_tokens_cap": cap_val,
+            "rejected_tokens": rej_toks,
+        }
+        for prov_key in ("document_id", "writer_key", "image_sha256", "image_dhash", "split", "source_checkpoint"):
+            if rec.get(prov_key) is not None and str(rec.get(prov_key)).strip():
+                pair[prov_key] = rec[prov_key]
+        pairs.append(pair)
     return pairs

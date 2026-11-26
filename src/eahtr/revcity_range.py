@@ -46,9 +46,14 @@ class _HTTPRangeFile(io.RawIOBase):
         if self.pos >= self.tail_offset:
             chunk = self.tail_bytes[self.pos - self.tail_offset : end - self.tail_offset]
         else:
+            expected = end - self.pos
             req = urllib.request.Request(self.url, headers={"Range": f"bytes={self.pos}-{end - 1}"})
             with urllib.request.urlopen(req, timeout=60) as resp:
-                chunk = resp.read()
+                if getattr(resp, "status", None) != 206:
+                    raise RuntimeError(f"Expected HTTP 206 for byte range, got {getattr(resp, 'status', None)}")
+                chunk = resp.read(expected + 1)
+                if len(chunk) != expected:
+                    raise RuntimeError(f"Range read length mismatch: got {len(chunk)} bytes, expected {expected}")
         self.pos += len(chunk)
         return chunk
 
@@ -64,12 +69,18 @@ def fetch_revcity_smoke_sample(
         match = re.search(r"/(\d+)$", cr)
         if resp.status != 206 or not match:
             raise RuntimeError(f"HTTP Range unsupported for {url} (status={resp.status}, Content-Range={cr!r})")
+        _ = resp.read(2)
         total_size = int(match.group(1))
     tail_off = max(0, total_size - tail_bytes)
+    expected_tail = total_size - tail_off
     with urllib.request.urlopen(
         urllib.request.Request(url, headers={"Range": f"bytes={tail_off}-{total_size - 1}"}), timeout=60
     ) as resp:
-        tail = resp.read()
+        if getattr(resp, "status", None) != 206:
+            raise RuntimeError(f"Expected HTTP 206 on EOCD tail request, got {getattr(resp, 'status', None)}")
+        tail = resp.read(expected_tail + 1)
+        if len(tail) != expected_tail:
+            raise RuntimeError(f"EOCD tail byte mismatch: got {len(tail)}, expected {expected_tail}")
     with zipfile.ZipFile(_HTTPRangeFile(url, total_size, tail_off, tail)) as zf:
         by_stem: dict[str, dict[str, str]] = {}
         for name in zf.namelist():
@@ -89,7 +100,8 @@ def fetch_revcity_smoke_sample(
             if stem in seen_stems:
                 continue
             seen_stems.add(stem)
-            text = clean_diplomatic_target(parse_alto_xml_lines(zf.read(xml_m).decode("utf-8", errors="replace")))
+            raw_lines = parse_alto_xml_lines(zf.read(xml_m).decode("utf-8", errors="replace"), sort_regions=False)
+            text = clean_diplomatic_target("\n".join(raw_lines))
             if len(text.split()) < 8:
                 continue
             img_out = out_dir / f"{stem}{Path(img_m).suffix.lower()}"

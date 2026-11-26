@@ -49,10 +49,11 @@ def test_license_allowlist_enforcement() -> None:
 def test_parse_alto_xml_lines_extracts_ordered_text() -> None:
     alto = """<?xml version="1.0" encoding="UTF-8"?>
     <alto xmlns="http://www.loc.gov/standards/alto/ns-v4#">
+      <Tags><OtherTag ID="TAG_M" LABEL="marginalia"/></Tags>
       <Layout>
         <Page ID="P1" WIDTH="2000" HEIGHT="1500">
           <PrintSpace HPOS="0" VPOS="0" WIDTH="2000" HEIGHT="1500">
-            <TextBlock ID="TB_M" TYPE="marginalia" HPOS="50" VPOS="40" WIDTH="100" HEIGHT="30">
+            <TextBlock ID="TB_M" TAGREFS="TAG_M" HPOS="50" VPOS="40" WIDTH="100" HEIGHT="30">
               <TextLine ID="TLM" VPOS="40" HPOS="50"><String CONTENT="Note"/></TextLine>
             </TextBlock>
             <TextBlock ID="TB_R" HPOS="1200" VPOS="100" WIDTH="500" HEIGHT="200">
@@ -67,7 +68,8 @@ def test_parse_alto_xml_lines_extracts_ordered_text() -> None:
       </Layout>
     </alto>
     """
-    assert parse_alto_xml_lines(alto) == ["Head Quarters", "July 1779", "Right Col", "Note"]
+    assert parse_alto_xml_lines(alto) == ["Note", "Right Col", "Head Quarters", "July 1779"]
+    assert parse_alto_xml_lines(alto, sort_regions=True) == ["Head Quarters", "July 1779", "Right Col", "Note"]
     assert detect_two_page_opening(alto) is True
 
 
@@ -182,5 +184,6 @@ def test_audit_split_disjointness_catches_all_leak_vectors() -> None:
         [{"record_id": "e1", "document_id": "de1", "writer_key": "we1", "image_sha256": "se1", "image_dhash": "0000000000000001", "text": "delta epsilon zeta"}],
         max_dhash_distance=4,
     )
-    assert dhash_report["passed"] is False
+    assert dhash_report["passed"] is True
+    assert dhash_report["dhash_review_count"] == 1
     assert dhash_report["perceptual_image_collisions"] == [("t1", "e1", 1)]

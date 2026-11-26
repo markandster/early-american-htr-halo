@@ -94,7 +94,7 @@ from eahtr.colab_pipeline import (
 )
 from eahtr.corpus import detect_two_page_opening, filter_corpus_record, parse_alto_xml_lines, parse_page_xml_lines
 from eahtr.hf_dataset import push_splits_to_hf_hub
-from eahtr.hygiene import audit_split_disjointness, clean_diplomatic_target, compute_dhash
+from eahtr.hygiene import audit_split_disjointness, clean_diplomatic_target, compute_dhash, extract_word_ngrams
 from eahtr.metrics import normalize_preserve_newlines, normalize_strict, paired_bootstrap_ci, score_line_breaks, score_pair
 from eahtr.rewards import build_preference_pairs, recommended_max_new_tokens, score_group_completions, score_transcription
 

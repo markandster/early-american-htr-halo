@@ -29,13 +29,21 @@ def main() -> int:
     parser.add_argument("--out-json", type=Path, required=True)
     parser.add_argument("--baseline-predictions", type=Path, default=None, help="Optional baseline JSON for paired cluster bootstrap CIs")
     parser.add_argument("--max-pages", type=int, default=None)
+    parser.add_argument("--max-new-tokens", type=int, default=2048, help="Fixed inference-time decode token cap")
     parser.add_argument("--repetition-penalty", type=float, default=1.0)
     parser.add_argument("--swap-images", action="store_true", help="Permute image paths across pages to verify vision grounding")
     parser.add_argument("--dual-convention", action="store_true", help="Also report raw_strict_cer_pct against row['raw_text']")
     parser.add_argument("--model-family", choices=("gemma4", "inkling2"), default="gemma4")
     args = parser.parse_args()
 
-    if "test" in args.eval_jsonl.name.lower() and not args.allow_frozen_test:
+    rows = _load_jsonl(args.eval_jsonl)
+    if args.max_pages:
+        rows = rows[: args.max_pages]
+    if not rows:
+        print(f"Empty evaluation manifest: {args.eval_jsonl}", file=sys.stderr)
+        return 2
+    has_test_split = "test" in args.eval_jsonl.name.lower() or any("test" in str(r.get("split", "")).lower() for r in rows)
+    if has_test_split and not args.allow_frozen_test:
         print("Refusing test manifest without --allow-frozen-test during dev. Use val.jsonl.", file=sys.stderr)
         return 2
 
@@ -52,12 +60,7 @@ def main() -> int:
     from PIL import Image
     from transformers import AutoModelForImageTextToText, AutoProcessor
 
-    rows = _load_jsonl(args.eval_jsonl)
-    if args.max_pages:
-        rows = rows[: args.max_pages]
-
     proc = AutoProcessor.from_pretrained(str(args.model_dir))
-    tok = getattr(proc, "tokenizer", proc)
     model = AutoModelForImageTextToText.from_pretrained(
         str(args.model_dir), torch_dtype=torch.bfloat16, device_map="auto",
         attn_implementation="sdpa" if args.model_family == "gemma4" else "eager",
@@ -68,14 +71,13 @@ def main() -> int:
     sw = sW = sc = sC = nl_e = nl_c = ot_e = ot_c = tp = pr_l = rf_l = loops = capped = non_t = leaks = mods = tleaks = 0
     raw_ce = raw_cc = 0
     n_rows = len(rows)
+    cap = int(args.max_new_tokens)
     for idx, row in enumerate(rows):
         img_path = rows[(idx + 1) % n_rows]["image_path"] if (args.swap_images and n_rows > 1) else row["image_path"]
         img = Image.open(img_path).convert("RGB")
         msgs = [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": DIPLOMATIC_PROMPT}]}]
         prompt = proc.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
         inputs = proc(text=[prompt], images=[img], return_tensors="pt").to(model.device)
-        ref_toks = len(tok(row["text"], add_special_tokens=False)["input_ids"])
-        cap = recommended_max_new_tokens(ref_toks, min_tokens=2048)
         with torch.no_grad():
             out = model.generate(**inputs, max_new_tokens=cap, do_sample=False, repetition_penalty=args.repetition_penalty)
         gen_ids = out[:, inputs["input_ids"].shape[1] :]
@@ -121,11 +123,14 @@ def main() -> int:
         scores["raw_strict_cer_pct"] = round(100.0 * raw_ce / raw_cc, 2)
     if args.baseline_predictions and args.baseline_predictions.is_file():
         base_data = json.loads(args.baseline_predictions.read_text(encoding="utf-8"))
-        base_map = {r["record_id"]: r["strict_cer"] for r in base_data.get("predictions", [])}
-        diffs = [p["strict_cer"] - base_map[p["record_id"]] for p in preds if p["record_id"] in base_map]
-        cids = [p["document_id"] for p in preds if p["record_id"] in base_map]
+        base_rows = base_data if isinstance(base_data, list) else base_data.get("predictions", [])
+        base_map = {r["record_id"]: r["strict_cer"] for r in base_rows}
+        matched = [p for p in preds if p["record_id"] in base_map]
+        diffs = [p["strict_cer"] - base_map[p["record_id"]] for p in matched]
+        cids = [p["document_id"] for p in matched]
+        wts = [max(1, len(p["reference"])) for p in matched]
         if diffs:
-            scores["bootstrap_vs_baseline"] = paired_bootstrap_ci(diffs, cids)
+            scores["bootstrap_vs_baseline"] = paired_bootstrap_ci(diffs, cids, weights=wts)
 
     args.out_json.parent.mkdir(parents=True, exist_ok=True)
     args.out_json.write_text(json.dumps({"scores": scores, "predictions": preds}, ensure_ascii=False, indent=2), encoding="utf-8")

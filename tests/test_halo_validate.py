@@ -53,7 +53,7 @@ def test_tier1_validator_rejects_yaml11_boolean_and_ep_all_linear(tmp_path: Path
 
     bad_smpo_dir = tmp_path / "bad_smpo"
     bad_smpo_dir.mkdir()
-    (bad_smpo_dir / "bad_vlm_smpo.yaml").write_text(
+    (bad_smpo_dir / "run_12b_smpo.yaml").write_text(
         "bf16: true\nloss_type: smooth_lower_bound\nuse_margin_schedule: true\nuse_peft: true\nlora_dropout: 0.0\nlearning_rate: 5.0e-6\nchosen_sft_ratio: 0.25\n",
         encoding="utf-8",
     )
@@ -156,7 +156,10 @@ def test_filter_vlm_rows_post_expansion_and_vram_smoke_configs(tmp_path: Path) -
         vram_gb=80.0,
         repo_root=repo_root,
     )
-    assert yaml.safe_load(smpo_80.read_text(encoding="utf-8"))["max_length"] == 4096
+    smpo_80_cfg = yaml.safe_load(smpo_80.read_text(encoding="utf-8"))
+    assert smpo_80_cfg["max_length"] == 4096
+    assert smpo_80_cfg["load_in_4bit"] is False
+    assert smpo_80_cfg["optim"] == "adamw_torch"
 
 
 def test_verify_train_sample_image_tokens_and_smoke_notebook(tmp_path: Path) -> None:
@@ -228,10 +231,61 @@ def test_verify_processor_image_tokens_and_run_log_losses(tmp_path: Path, monkey
     with pytest.raises(ValueError, match="Non-finite"):
         verify_halo_run_log_finite_loss(log_nan)
 
+    log_single = tmp_path / "single.log"
+    log_single.write_text("{'loss': 1.42, 'eval_loss': 0.91}\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="< 2"):
+        verify_halo_run_log_finite_loss(log_single, min_steps=2)
+
     log_empty = tmp_path / "empty.log"
     log_empty.write_text("training completed with no metrics\n", encoding="utf-8")
     with pytest.raises(ValueError, match="Found 0 training loss metrics"):
         verify_halo_run_log_finite_loss(log_empty)
+
+
+def test_fetch_revcity_smoke_sample_range_and_alto_join(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import io, zipfile
+    from eahtr.revcity_range import fetch_revcity_smoke_sample
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("apsrevcity%3A1001.jpg", b"FAKEJPGDATA")
+        zf.writestr(
+            "apsrevcity%3A1001.xml",
+            "<alto><Layout><Page><PrintSpace><TextBlock>"
+            "<TextLine><String CONTENT='Head'/><String CONTENT='Quarters'/><String CONTENT='Middlebrook'/></TextLine>"
+            "<TextLine><String CONTENT='July'/><String CONTENT='the'/><String CONTENT='Sixth'/><String CONTENT='1779'/><String CONTENT='Sir'/></TextLine>"
+            "</TextBlock></PrintSpace></Page></Layout></alto>",
+        )
+    zip_bytes = buf.getvalue()
+
+    class _FakeResp:
+        def __init__(self, status: int, data: bytes, cr: str) -> None:
+            self.status, self._data, self.headers = status, data, {"Content-Range": cr}
+        def __enter__(self) -> "_FakeResp":
+            return self
+        def __exit__(self, *a: object) -> None:
+            return None
+        def read(self, n: int = -1) -> bytes:
+            return self._data if n < 0 else self._data[:n]
+
+    def _fake_urlopen(req, timeout=60):
+        r = req.headers.get("Range", "bytes=0-0").replace("bytes=", "")
+        a, b = (int(x) for x in r.split("-"))
+        return _FakeResp(206, zip_bytes[a : b + 1], f"bytes {a}-{b}/{len(zip_bytes)}")
+
+    monkeypatch.setattr("eahtr.revcity_range.urllib.request.urlopen", _fake_urlopen)
+    recs = fetch_revcity_smoke_sample("https://example.invalid/revcity.zip", tmp_path / "rc_imgs", max_pages=4)
+    assert len(recs) == 1
+    assert "Head Quarters Middlebrook" in recs[0]["text"]
+
+    call_n = {"n": 0}
+    def _bad_second_urlopen(req, timeout=60):
+        call_n["n"] += 1
+        return _FakeResp(206 if call_n["n"] == 1 else 200, zip_bytes[:1], f"bytes 0-0/{len(zip_bytes)}")
+
+    monkeypatch.setattr("eahtr.revcity_range.urllib.request.urlopen", _bad_second_urlopen)
+    with pytest.raises(RuntimeError, match="Expected HTTP 206"):
+        fetch_revcity_smoke_sample("https://example.invalid/revcity.zip", tmp_path / "rc_fail", max_pages=4)
 
 
 def test_halo_export_helpers_and_dir_verifier(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -302,4 +356,14 @@ def test_halo_export_helpers_and_dir_verifier(tmp_path: Path, monkeypatch: pytes
 
     (ok_dir / "chat_template.jinja").write_text("Thinking effort level: 0.9", encoding="utf-8")
     with pytest.raises(ValueError, match="0.9 reasoning-effort"):
+        verify_exported_vlm_dir(ok_dir)
+
+    hub_like_tpl = (
+        "{%- for m in messages -%}<|turn>{{ m['role'] }}\n"
+        "{%- if m['role'] == 'assistant' and add_generation_prompt == false -%}<|channel>thought\n<channel|>{%- endif -%}"
+        "{{ m['content'][0]['text'] }}<turn|>\n{%- endfor -%}"
+        "{%- if add_generation_prompt -%}<|turn>model\n<|channel>thought\n<channel|>{%- endif -%}"
+    )
+    (ok_dir / "chat_template.jinja").write_text(hub_like_tpl, encoding="utf-8")
+    with pytest.raises(ValueError, match="assistant-turn prefix invariance"):
         verify_exported_vlm_dir(ok_dir)

@@ -130,10 +130,19 @@ def score_line_breaks(prediction: str, reference: str) -> dict[str, float]:
         matched_edits += sum(len(pred_lines[idx]) for idx in unused)
         order_tolerant_cer = matched_edits / max(1, total_ref_chars)
 
+    ot_char_edits = matched_edits if ref_lines else (0 if not pred_lines else len(pred_nl))
+    ot_ref_chars = sum(len(ln) for ln in ref_lines) if ref_lines else 0
     return {
         "newline_cer": round(newline_cer, 6),
         "line_boundary_f1": round(boundary_f1, 6),
         "order_tolerant_cer": round(order_tolerant_cer, 6),
+        "newline_char_edits": char_edits,
+        "newline_ref_chars": len(ref_nl),
+        "matched_boundaries": len(pred_breaks & ref_breaks),
+        "pred_lines": len(pred_breaks),
+        "ref_lines": len(ref_breaks),
+        "order_tolerant_char_edits": ot_char_edits,
+        "order_tolerant_ref_chars": ot_ref_chars,
     }
 
 
@@ -143,28 +152,34 @@ def paired_bootstrap_ci(
     *,
     n_boot: int = 1000,
     seed: int = 42,
+    weights: Sequence[float] | None = None,
 ) -> dict[str, float]:
-    """Compute cluster-bootstrap 95% confidence interval for paired metric differences."""
-    if len(diffs) != len(cluster_ids):
-        raise ValueError("diffs and cluster_ids must have identical length")
+    """Compute cluster-bootstrap 95% CI (optionally character-weighted for micro-CER)."""
+    if len(diffs) != len(cluster_ids) or (weights is not None and len(weights) != len(diffs)):
+        raise ValueError("diffs, cluster_ids, and weights must have identical length")
     if not diffs:
         raise ValueError("paired_bootstrap_ci requires at least one observation")
 
-    clusters: dict[str, list[float]] = {}
-    for d, cid in zip(diffs, cluster_ids, strict=True):
-        clusters.setdefault(str(cid), []).append(float(d))
+    w_seq = [1.0] * len(diffs) if weights is None else [max(0.0, float(w)) for w in weights]
+    clusters: dict[str, list[tuple[float, float]]] = {}
+    for d, w, cid in zip(diffs, w_seq, cluster_ids, strict=True):
+        clusters.setdefault(str(cid), []).append((float(w) * float(d), float(w)))
     keys = list(clusters)
     rng = random.Random(seed)
     means: list[float] = []
     for _ in range(max(100, n_boot)):
-        sampled_vals: list[float] = []
+        num = 0.0
+        den = 0.0
         for k in rng.choices(keys, k=len(keys)):
-            sampled_vals.extend(clusters[k])
-        means.append(sum(sampled_vals) / len(sampled_vals))
+            for wd, w in clusters[k]:
+                num += wd
+                den += w
+        means.append(num / max(1e-12, den))
     means.sort()
     lo_idx = max(0, int(0.025 * len(means)))
     hi_idx = min(len(means) - 1, int(0.975 * len(means)))
-    point = sum(diffs) / len(diffs)
+    total_w = sum(w_seq)
+    point = sum(w * float(d) for w, d in zip(w_seq, diffs, strict=True)) / max(1e-12, total_w)
     return {
         "mean": round(point, 6),
         "ci_low": round(means[lo_idx], 6),

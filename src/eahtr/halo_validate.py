@@ -103,7 +103,7 @@ def _validate_single_tier1(yaml_path: Path, repo_root: Path) -> dict[str, Any]:
         if "o_proj" not in targets:
             raise ValueError(f"{name}: Inkling-2-Small requires o_proj alongside expert LoRA targets")
 
-    if "_vlm_smpo" in name:
+    if "_smpo" in name or cfg.get("loss_type") == "smooth_lower_bound":
         if cfg.get("loss_type") != "smooth_lower_bound":
             raise ValueError(f"{name}: expected loss_type: smooth_lower_bound")
         if cfg.get("use_margin_schedule") is not True:

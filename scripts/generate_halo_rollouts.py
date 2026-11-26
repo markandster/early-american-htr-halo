@@ -64,6 +64,7 @@ def main() -> int:
             "image_sha256": row.get("image_sha256", ""), "image_dhash": row.get("image_dhash", ""),
             "image_path": row["image_path"], "prompt": DIPLOMATIC_PROMPT, "text": row["text"],
             "completions": comps, "finish_reasons": frs, "max_new_tokens_cap": cap,
+            "split": row.get("split", "train"), "source_checkpoint": str(args.model_dir),
         })
 
     elapsed = max(0.01, time.time() - t0)

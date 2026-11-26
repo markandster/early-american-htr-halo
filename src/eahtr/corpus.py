@@ -47,9 +47,17 @@ def _textline_text(line_elem: ET.Element) -> str:
     return " ".join(words).strip()
 
 
-def parse_alto_xml_lines(xml_text: str, *, sort_regions: bool = True) -> list[str]:
-    """Extract ordered line strings from ALTO-XML, optionally sorting regions by type and geometry."""
+def parse_alto_xml_lines(xml_text: str, *, sort_regions: bool = False) -> list[str]:
+    """Extract ordered line strings from ALTO-XML, preserving annotated reading order by default."""
     root = ET.fromstring(xml_text)
+    tag_map: dict[str, str] = {}
+    for elem in root.iter():
+        if _local_tag(elem.tag) == "OtherTag":
+            tid = str(elem.attrib.get("ID") or "").strip()
+            lbl = str(elem.attrib.get("LABEL") or "").strip().lower()
+            if tid and lbl:
+                tag_map[tid] = lbl
+
     blocks = [el for el in root.iter() if _local_tag(el.tag) == "TextBlock"]
     if not blocks:
         lines: list[str] = []
@@ -68,7 +76,8 @@ def parse_alto_xml_lines(xml_text: str, *, sort_regions: bool = True) -> list[st
 
     block_rows: list[tuple[tuple[int, int, float, int], list[tuple[tuple[float, float, int], str]]]] = []
     for b_idx, blk in enumerate(blocks):
-        b_type = str(blk.attrib.get("TYPE") or blk.attrib.get("TAGREFS") or "").lower()
+        tag_labels = [tag_map.get(tid, tid.lower()) for tid in str(blk.attrib.get("TAGREFS") or "").split()]
+        b_type = " ".join([str(blk.attrib.get("TYPE") or "").lower(), *tag_labels])
         priority = 1 if any(tok in b_type for tok in _SECONDARY_BLOCK_TYPES) else 0
         has_v, vpos = _float_attr(blk, "VPOS", 0.0)
         has_h, hpos = _float_attr(blk, "HPOS", 0.0)

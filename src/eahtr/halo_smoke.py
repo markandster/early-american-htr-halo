@@ -208,6 +208,7 @@ def build_smoke_yaml_configs(
     resolved_root = repo_root or base_sft_yaml.resolve().parents[2]
     out_dir.mkdir(parents=True, exist_ok=True)
     small_vram = vram_gb < 32.0
+    use_qlora = vram_gb < 56.0
     stage2_model = smpo_model_dir if smpo_model_dir is not None else out_dir / "sft_merged"
 
     def _patch(cfg: dict[str, Any], ds_path: Path, output_subdir: str, *, is_smpo: bool) -> dict[str, Any]:
@@ -223,11 +224,11 @@ def build_smoke_yaml_configs(
                 "bf16": True,
                 "dataset": [str(ds_path)],
                 "use_peft": True,
-                "load_in_4bit": True,
-                "use_bnb_nested_quant": True,
+                "load_in_4bit": use_qlora,
+                "use_bnb_nested_quant": use_qlora,
                 "lora_target_modules": "all-linear",
                 "gradient_checkpointing": True,
-                "optim": "adamw_8bit",
+                "optim": "adamw_8bit" if use_qlora else "adamw_torch",
                 "use_liger_kernel": False,
                 "log_decoded_samples": True,
                 "max_steps": 5,
@@ -303,12 +304,14 @@ _LOSS_LOG_RE = re.compile(r"['\"]?loss['\"]?\s*[:=]\s*([+-]?(?:\d+(?:\.\d*)?|\.\
 
 
 def verify_halo_run_log_finite_loss(log_path: Path, *, min_steps: int = 1) -> list[float]:
-    """Assert Halo training run log recorded >= min_steps finite losses and zero NaN/Inf."""
+    """Assert Halo training run log recorded >= min_steps finite losses (at most 1 per line)."""
     if not log_path.is_file():
         raise FileNotFoundError(f"Expected Halo run log not found: {log_path}")
-    text = log_path.read_text(encoding="utf-8", errors="replace")
     losses: list[float] = []
-    for match in _LOSS_LOG_RE.finditer(text):
+    for line in log_path.read_text(encoding="utf-8", errors="replace").splitlines():
+        match = _LOSS_LOG_RE.search(line)
+        if not match:
+            continue
         val = float(match.group(1))
         if not math.isfinite(val):
             raise ValueError(f"Non-finite training loss {match.group(1)!r} detected in {log_path}")

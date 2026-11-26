@@ -178,12 +178,19 @@ def test_build_preference_pairs_selection_filtering_and_error_guards() -> None:
     assert blank_chosen_guard[0]["rejected_is_budget_capped"] is False
 
     capped_rec = build_preference_pairs(
-        [{"record_id": "cap1", "image_path": "/tmp/p2.jpg", "text": ref, "max_new_tokens_cap": 8, "completions": [ref, "Head Quarters July"], "finish_reasons": ["stop", "length"]}],
+        [{
+            "record_id": "cap1", "document_id": "doc-cap", "writer_key": "w-cap", "image_sha256": "sha-cap",
+            "split": "train", "source_checkpoint": "ckpt-5", "image_path": "/tmp/p2.jpg",
+            "text": ref, "max_new_tokens_cap": 64, "completions": [ref, "Head Quarters July"], "finish_reasons": ["stop", "length"],
+        }],
         min_reward_margin=0.05,
     )
     assert len(capped_rec) == 1
     assert capped_rec[0]["rejected_is_loop"] is False
     assert capped_rec[0]["rejected_is_budget_capped"] is True
+    assert capped_rec[0]["document_id"] == "doc-cap"
+    assert capped_rec[0]["image_sha256"] == "sha-cap"
+    assert capped_rec[0]["source_checkpoint"] == "ckpt-5"
 
     newline_dup = build_preference_pairs(
         [{"record_id": "nd", "image_path": "/tmp/p2.jpg", "text": "Sir\nI am yours", "completions": ["Sir\nI am yours", "Sir I am yours"], "finish_reasons": ["stop", "stop"]}],

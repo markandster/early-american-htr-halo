@@ -50,11 +50,12 @@ def test_all_competition_candidates_pass_policy() -> None:
     assert parse_revcity_stem_id("apsrevcity%3A1008") == ("apsrevcity", 1008, "apsrevcity_1008")
     assert parse_revcity_stem_id("lcprevcity_159_OBJ") == ("lcprevcity", 159, "lcprevcity_159_OBJ")
     groups = assign_revcity_item_groups(
-        ["apsrevcity%3A1008", "apsrevcity%3A1009", "apsrevcity%3A1015", "lcprevcity_159_OBJ"],
+        ["apsrevcity%3A1008", "apsrevcity%3A1012", "apsrevcity%3A1025", "lcprevcity_159_OBJ", "mss_b_h56d_008-001", "mss_b_h56d_008-003"],
         creator_map={"lcprevcity_159_OBJ": "hand_xyz"},
     )
-    assert groups["apsrevcity%3A1008"]["document_id"] == groups["apsrevcity%3A1009"]["document_id"]
-    assert groups["apsrevcity%3A1015"]["document_id"] != groups["apsrevcity%3A1008"]["document_id"]
+    assert groups["apsrevcity%3A1008"]["document_id"] == groups["apsrevcity%3A1012"]["document_id"]
+    assert groups["apsrevcity%3A1025"]["document_id"] != groups["apsrevcity%3A1008"]["document_id"]
+    assert groups["mss_b_h56d_008-001"]["document_id"] == groups["mss_b_h56d_008-003"]["document_id"]
     assert groups["lcprevcity_159_OBJ"]["writer_key"] == "scribed_hand:hand_xyz"
     assert groups["lcprevcity_159_OBJ"]["hand_attributed"] == "true"
 
@@ -146,6 +147,9 @@ def test_generated_notebook_valid_json_ast_and_public_only(tmp_path: Path) -> No
         "paired_bootstrap_ci",
         "prefer_gold_chosen=True",
         "_eval_scores_{cache_key}",
+        "dhash_review_candidates",
+        "discarded_oom_microbatches",
+        "max_id_gap=5",
         "hard_case_panel",
         "USE_GOOGLE_DRIVE",
         "llm_int8_skip_modules",

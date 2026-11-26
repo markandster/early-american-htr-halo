@@ -90,9 +90,7 @@ def run_eval_panel(
         messages = [{'role': 'user', 'content': [{'type': 'image'}, {'type': 'text', 'text': DIPLOMATIC_PROMPT}]}]
         prompt = _apply_chat_nothink(processor, messages, add_generation_prompt=True)
         inputs = processor(text=[prompt], images=[image], return_tensors='pt').to(model.device)
-        tok = getattr(processor, 'tokenizer', processor)
-        ref_tok_len = len(tok(row['text'], add_special_tokens=False)['input_ids']) if hasattr(tok, '__call__') else int(len(row['text'].split()) * 1.5)
-        cap = int(max_new_tokens) if max_new_tokens is not None else recommended_max_new_tokens(ref_tok_len, min_tokens=MAX_EVAL_NEW_TOKENS)
+        cap = int(max_new_tokens or MAX_EVAL_NEW_TOKENS)
         t0 = time.time()
         out_ids = model.generate(**inputs, max_new_tokens=cap, do_sample=False)
         elapsed = round(time.time() - t0, 2)
@@ -152,15 +150,17 @@ def _assert_highres_processor_config(model_dir: Path, hf_repo: str) -> None:
 CELL_6_RUN_SOURCE = """
 # === Step 3: Dev Validation Only (test_public stays frozen until final eval) ===
 val_slice = val_rows[:VAL_EVAL_MAX_PAGES] if VAL_EVAL_MAX_PAGES else val_rows
-sham_rows = make_sham_derangement(train_rows, seed=SEED)[:SHAM_MAX_PRESENTATIONS]
+pilot_train_rows = train_rows[:SHAM_MAX_PRESENTATIONS]
+sham_rows = make_sham_derangement(pilot_train_rows, seed=SEED)
 dev_test_slice = test_public_rows if FINAL_FREEZE_EVAL_TEST_PUBLIC else []
+eval_slice = dev_test_slice if (FINAL_FREEZE_EVAL_TEST_PUBLIC and dev_test_slice) else val_slice
 
 ALL_RESULTS = {}
 for cand_key in CANDIDATE_KEYS:
     ALL_RESULTS[cand_key] = {}
     for arm in ARMS:
         arm_rows = sham_rows if arm == 'sham_short' else (
-            train_rows[:len(sham_rows)] if (arm == 'real' and SMOKE_TEST_MODE) else train_rows
+            pilot_train_rows if (arm == 'real' and SMOKE_TEST_MODE) else train_rows
         )
         ALL_RESULTS[cand_key][arm] = run_candidate_arm(cand_key, arm, arm_rows, val_slice, dev_test_slice)
 
@@ -173,8 +173,10 @@ for cand_key, arms in ALL_RESULTS.items():
     ci_vs_base = None
     if z_res.get('per_side_cer') and r_res.get('per_side_cer'):
         diffs = [rv - zv for rv, zv in zip(r_res['per_side_cer'], z_res['per_side_cer'])]
-        cids = [row['document_id'] for row in val_slice[:len(diffs)]]
-        ci_vs_base = paired_bootstrap_ci(diffs, cids, seed=SEED)
+        eval_sub = eval_slice[:len(diffs)]
+        cids = [row['document_id'] for row in eval_sub]
+        wts = [max(1, len(normalize_strict(row['text']))) for row in eval_sub]
+        ci_vs_base = paired_bootstrap_ci(diffs, cids, weights=wts, seed=SEED)
     summary.append({
         'candidate': cand_key,
         'eval_split': 'test_public' if FINAL_FREEZE_EVAL_TEST_PUBLIC else 'val',
@@ -198,8 +200,9 @@ CELL_7_GRPO_SOURCE = """
 if GENERATE_OFFLINE_GRPO_ROLLOUTS:
     cand_key = CANDIDATE_KEYS[0]
     spec = COMPETITION_CANDIDATES[cand_key]
-    merged_dir = OUTPUT_ROOT / f'{cand_key}-real' / 'merged_hf'
-    adapter_dir = OUTPUT_ROOT / f'{cand_key}-real' / 'adapter_best'
+    real_res = ALL_RESULTS.get(cand_key, {}).get('real', {}) if 'ALL_RESULTS' in globals() else {}
+    merged_dir = Path(real_res['merged_hf_dir']) if real_res.get('merged_hf_dir') else (OUTPUT_ROOT / f'{cand_key}-real' / 'merged_hf')
+    adapter_dir = Path(real_res['adapter_dir']) if real_res.get('adapter_dir') else (OUTPUT_ROOT / f'{cand_key}-real' / 'adapter_best')
     assert merged_dir.is_dir() or adapter_dir.is_dir(), f'Train Stage 1 real checkpoint first under {OUTPUT_ROOT}'
 
     processor = load_processor_fullres({'hf_repo': spec.hf_repo, 'max_pixels': spec.max_pixels, 'trust_remote_code': spec.trust_remote_code})
@@ -267,6 +270,9 @@ if GENERATE_OFFLINE_GRPO_ROLLOUTS:
                 'text': row['text'],
                 'completions': completions,
                 'finish_reasons': finish_reasons,
+                'max_new_tokens_cap': cap,
+                'split': 'train',
+                'source_checkpoint': str(merged_dir if merged_dir.is_dir() else adapter_dir),
             })
 
     pref_pairs = build_preference_pairs(pref_records, min_reward_margin=0.05, prefer_gold_chosen=True)
