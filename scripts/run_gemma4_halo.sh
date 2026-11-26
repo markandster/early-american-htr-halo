@@ -6,6 +6,8 @@ set -euo pipefail
 # runs SFT or VLM SMPO, and converts/merges outputs with export parity verification.
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export PYTHONPATH="${REPO_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
 HALO_DIR="${HALO_DIR:-/tmp/halo}"
 STAGE="${STAGE:-sft}"                     # sft | smpo
 MODEL_SIZE="${MODEL_SIZE:-12b}"           # 12b | 26b_a4b | 31b
@@ -65,13 +67,10 @@ fi
 STAGED_BASE="${WORK_DIR}/gemma4-${MODEL_SIZE}-highres-1120"
 RUN_CFG_DIR="${WORK_DIR}/run_cfg_${MODEL_SIZE}_${STAGE}_${RUN_ID}"
 mkdir -p "${WORK_DIR}" "${RUN_CFG_DIR}"
-python3 "${REPO_ROOT}/scripts/stage_gemma4_highres.py" \
-  --model "${HF_REPO}" --revision "${HF_REV}" --out-dir "${STAGED_BASE}" --max-soft-tokens 1120 \
-  --chat-template "${REPO_ROOT}/configs/halo/templates/gemma4_htr_nothink.jinja"
 
 RUN_YAML="${RUN_CFG_DIR}/$(basename "${BASE_YAML}")"
 SFT_MERGED_DIR="${SFT_MERGED_DIR:-${DEFAULT_SFT_MERGED}}"
-python3 - <<PY
+"${PYTHON_BIN}" - <<PY
 from pathlib import Path
 import yaml
 
@@ -92,7 +91,7 @@ if isinstance(cfg.get("chat_template"), str) and not Path(cfg["chat_template"]).
 Path("${RUN_YAML}").write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
 PY
 
-read -r RESOLVED_EP USE_PEFT < <(python3 -c "import yaml; c=yaml.safe_load(open('${RUN_YAML}')); print(int(c.get('expert_parallel_size', 1) or 1), 'true' if c.get('use_peft') else 'false')")
+read -r RESOLVED_EP USE_PEFT < <("${PYTHON_BIN}" -c "import yaml; c=yaml.safe_load(open('${RUN_YAML}')); print(int(c.get('expert_parallel_size', 1) or 1), 'true' if c.get('use_peft') else 'false')")
 if [[ "${RESOLVED_EP}" -gt 1 ]]; then
   if [[ "${NUM_GPUS}" -ne "${RESOLVED_EP}" ]] && ! ( [[ "${RESOLVED_EP}" -eq 2 && "${NUM_GPUS}" -ge 2 && $((NUM_GPUS % 2)) -eq 0 ]] ); then
     echo "ERROR: Invalid GPU count NUM_GPUS=${NUM_GPUS} for expert_parallel_size=${RESOLVED_EP} (Halo requires nproc == EP, or EP == 2 with even nproc)." >&2
@@ -100,7 +99,11 @@ if [[ "${RESOLVED_EP}" -gt 1 ]]; then
   fi
 fi
 
-python3 "${REPO_ROOT}/scripts/validate_halo_configs.py" --config-dir "${RUN_CFG_DIR}" --halo-repo "${HALO_DIR}"
+"${PYTHON_BIN}" "${REPO_ROOT}/scripts/validate_halo_configs.py" --config-dir "${RUN_CFG_DIR}" --halo-repo "${HALO_DIR}"
+"${PYTHON_BIN}" "${REPO_ROOT}/scripts/stage_gemma4_highres.py" \
+  --model "${HF_REPO}" --revision "${HF_REV}" --out-dir "${STAGED_BASE}" --max-soft-tokens 1120 \
+  --chat-template "${REPO_ROOT}/configs/halo/templates/gemma4_htr_nothink.jinja"
+
 TRAIN_SCRIPT="${HALO_DIR}/scripts/training/sft.py"
 [[ "${STAGE}" == "smpo" ]] && TRAIN_SCRIPT="${HALO_DIR}/scripts/training/preference/smpo.py"
 
@@ -108,23 +111,23 @@ LOG_FILE="${WORK_DIR}/run_${MODEL_SIZE}_${STAGE}_${RUN_ID}.log"
 if [[ "${RESOLVED_EP}" -gt 1 || "${NUM_GPUS}" -gt 1 ]]; then
   torchrun --nproc_per_node="${NUM_GPUS}" "${TRAIN_SCRIPT}" "${RUN_YAML}" 2>&1 | tee "${LOG_FILE}"
 else
-  python3 "${TRAIN_SCRIPT}" "${RUN_YAML}" 2>&1 | tee "${LOG_FILE}"
+  "${PYTHON_BIN}" "${TRAIN_SCRIPT}" "${RUN_YAML}" 2>&1 | tee "${LOG_FILE}"
 fi
 
 MIN_LOG_STEPS="${MAX_STEPS:-5}"
 [[ "${MIN_LOG_STEPS}" -gt 5 ]] && MIN_LOG_STEPS=5
-python3 -c "from pathlib import Path; from eahtr.halo_smoke import verify_halo_run_log_finite_loss; print('Losses verified:', verify_halo_run_log_finite_loss(Path('${LOG_FILE}'), min_steps=${MIN_LOG_STEPS}))"
+"${PYTHON_BIN}" -c "from pathlib import Path; from eahtr.halo_smoke import verify_halo_run_log_finite_loss; print('Losses verified:', verify_halo_run_log_finite_loss(Path('${LOG_FILE}'), min_steps=${MIN_LOG_STEPS}))"
 
 if [[ "${USE_PEFT}" == "true" ]]; then
-  RESOLVED_ADAPTER="$(python3 -c "from pathlib import Path; d=Path('${ADAPTER_DIR}'); cands=[d]+[p for p in sorted(d.glob('checkpoint-*'), key=lambda p: int(p.name.split('-')[-1]) if p.name.split('-')[-1].isdigit() else -1, reverse=True) if p.is_dir()]; print(next(str(p) for p in cands if (p/'adapter_model.safetensors').is_file()))")"
-  python3 "${HALO_DIR}/scripts/after_training/merge_peft_adapters.py" \
+  RESOLVED_ADAPTER="$("${PYTHON_BIN}" -c "from pathlib import Path; d=Path('${ADAPTER_DIR}'); cands=[d]+[p for p in sorted(d.glob('checkpoint-*'), key=lambda p: int(p.name.split('-')[-1]) if p.name.split('-')[-1].isdigit() else -1, reverse=True) if p.is_dir()]; print(next(str(p) for p in cands if (p/'adapter_model.safetensors').is_file()))")"
+  "${PYTHON_BIN}" "${HALO_DIR}/scripts/after_training/merge_peft_adapters.py" \
     --adapter_dir "${RESOLVED_ADAPTER}" --output_dir "${MERGED_DIR}"
-  python3 "${REPO_ROOT}/scripts/verify_mlx_export.py" "${MERGED_DIR}" --reference-dir "${RESOLVED_ADAPTER}"
+  "${PYTHON_BIN}" "${REPO_ROOT}/scripts/verify_mlx_export.py" "${MERGED_DIR}" --reference-dir "${RESOLVED_ADAPTER}"
 else
-  RESOLVED_CKPT="$(python3 -c "from pathlib import Path; d=Path('${ADAPTER_DIR}'); cands=[d]+[p for p in sorted(d.glob('checkpoint-*'), key=lambda p: int(p.name.split('-')[-1]) if p.name.split('-')[-1].isdigit() else -1, reverse=True) if p.is_dir()]; print(next(str(p) for p in cands if (p/'config.json').is_file() and ((p/'model.safetensors').is_file() or (p/'model.safetensors.index.json').is_file())))")"
-  python3 "${HALO_DIR}/scripts/after_training/convert_to_bf16.py" \
+  RESOLVED_CKPT="$("${PYTHON_BIN}" -c "from pathlib import Path; d=Path('${ADAPTER_DIR}'); cands=[d]+[p for p in sorted(d.glob('checkpoint-*'), key=lambda p: int(p.name.split('-')[-1]) if p.name.split('-')[-1].isdigit() else -1, reverse=True) if p.is_dir()]; print(next(str(p) for p in cands if (p/'config.json').is_file() and ((p/'model.safetensors').is_file() or (p/'model.safetensors.index.json').is_file())))")"
+  "${PYTHON_BIN}" "${HALO_DIR}/scripts/after_training/convert_to_bf16.py" \
     --input_dir "${RESOLVED_CKPT}" --output_dir "${MERGED_DIR}" --verify
-  python3 - <<PY
+  "${PYTHON_BIN}" - <<PY
 import shutil
 from pathlib import Path
 src = Path("${STAGED_BASE}")
@@ -133,5 +136,5 @@ for fname in ("processor_config.json", "chat_template.jinja"):
     if (src / fname).is_file():
         shutil.copy2(src / fname, dst / fname)
 PY
-  python3 "${REPO_ROOT}/scripts/verify_mlx_export.py" "${MERGED_DIR}" --reference-dir "${STAGED_BASE}"
+  "${PYTHON_BIN}" "${REPO_ROOT}/scripts/verify_mlx_export.py" "${MERGED_DIR}" --reference-dir "${STAGED_BASE}"
 fi

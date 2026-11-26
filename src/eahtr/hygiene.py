@@ -78,18 +78,32 @@ def _full_page_text_hash(text: str, min_words: int = 8) -> str | None:
     return hashlib.sha256(" ".join(words).encode("utf-8")).hexdigest()
 
 
+def _read_gray_pixels(gray: object) -> list[int]:
+    if hasattr(gray, "get_flattened_data"):
+        return list(gray.get_flattened_data())  # type: ignore[attr-defined]
+    return list(gray.getdata())  # type: ignore[attr-defined]
+
+
 def compute_dhash(image_or_path: object, hash_size: int = 8) -> str:
     """Compute a 64-bit difference hash (hex) to catch rescans and alternate crops."""
     from PIL import Image
 
     if hasattr(image_or_path, "convert"):
         gray = image_or_path.convert("L").resize((hash_size + 1, hash_size))
+        try:
+            pixels = _read_gray_pixels(gray)
+        finally:
+            if hasattr(gray, "close"):
+                gray.close()
         bits = 0
-        pixels = list(gray.getdata())
     else:
         with Image.open(image_or_path) as img:  # type: ignore[arg-type]
             gray = img.convert("L").resize((hash_size + 1, hash_size))
-            pixels = list(gray.getdata())
+            try:
+                pixels = _read_gray_pixels(gray)
+            finally:
+                if hasattr(gray, "close"):
+                    gray.close()
         bits = 0
     for row in range(hash_size):
         row_start = row * (hash_size + 1)

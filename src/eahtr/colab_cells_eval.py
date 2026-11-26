@@ -89,10 +89,15 @@ def run_eval_panel(
     n_rows = len(rows)
     for idx, row in enumerate(tqdm(rows, desc=f'Eval {panel_name}', leave=False)):
         img_path = rows[(idx + 1) % n_rows]['image_path'] if (swap_images and n_rows > 1) else row['image_path']
-        image = Image.open(img_path).convert('RGB')
-        messages = [{'role': 'user', 'content': [{'type': 'image'}, {'type': 'text', 'text': DIPLOMATIC_PROMPT}]}]
-        prompt = _apply_chat_nothink(processor, messages, add_generation_prompt=True)
-        inputs = processor(text=[prompt], images=[image], return_tensors='pt').to(model.device)
+        with Image.open(img_path) as _raw_im:
+            image = _raw_im.convert('RGB')
+        try:
+            messages = [{'role': 'user', 'content': [{'type': 'image'}, {'type': 'text', 'text': DIPLOMATIC_PROMPT}]}]
+            prompt = _apply_chat_nothink(processor, messages, add_generation_prompt=True)
+            inputs = processor(text=[prompt], images=[image], return_tensors='pt').to(model.device)
+        finally:
+            if hasattr(image, 'close'):
+                image.close()
         cap = int(max_new_tokens or MAX_EVAL_NEW_TOKENS)
         t0 = time.time()
         with (torch.amp.autocast('cuda', dtype=torch.bfloat16) if torch.cuda.is_available() else torch.no_grad()):
@@ -312,10 +317,15 @@ if GENERATE_OFFLINE_GRPO_ROLLOUTS:
     rollout_thinking_leaks = 0
     with out_jsonl.open('w', encoding='utf-8') as fout:
         for row in tqdm(rollout_rows, desc='VLM Stage-2 Rollouts'):
-            image = Image.open(row['image_path']).convert('RGB')
-            messages = [{'role': 'user', 'content': [{'type': 'image'}, {'type': 'text', 'text': DIPLOMATIC_PROMPT}]}]
-            prompt = _apply_chat_nothink(processor, messages, add_generation_prompt=True)
-            inputs = processor(text=[prompt], images=[image], return_tensors='pt').to(model.device)
+            with Image.open(row['image_path']) as _raw_im:
+                image = _raw_im.convert('RGB')
+            try:
+                messages = [{'role': 'user', 'content': [{'type': 'image'}, {'type': 'text', 'text': DIPLOMATIC_PROMPT}]}]
+                prompt = _apply_chat_nothink(processor, messages, add_generation_prompt=True)
+                inputs = processor(text=[prompt], images=[image], return_tensors='pt').to(model.device)
+            finally:
+                if hasattr(image, 'close'):
+                    image.close()
             tok = getattr(processor, 'tokenizer', processor)
             cap = recommended_max_new_tokens(len(tok(row['text'], add_special_tokens=False)['input_ids']), min_tokens=MAX_EVAL_NEW_TOKENS)
             completions, finish_reasons = [], []

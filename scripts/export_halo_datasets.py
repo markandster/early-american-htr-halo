@@ -9,7 +9,7 @@ from pathlib import Path
 
 from eahtr.halo_export import export_halo_vlm_preference_dataset, export_halo_vlm_sft_dataset
 from eahtr.revcity_build import resolve_manifest_image_path
-from eahtr.vision_budget import DEFAULT_INKLING_CELL_SIZE, measure_max_vision_tokens, read_image_cell_size
+from eahtr.vision_budget import measure_max_vision_tokens, parse_cell_size
 
 
 def _load_jsonl(path: Path) -> list[dict]:
@@ -37,23 +37,6 @@ def _resolve_row_paths(rows: list[dict], manifest_path: Path, image_root: Path |
     return resolved_rows
 
 
-def _parse_cell_size(raw: str | None, tokenizer_ref: str) -> tuple[int, int]:
-    if raw:
-        parts = [int(x.strip()) for x in raw.lower().replace("x", ",").split(",") if x.strip()]
-        if len(parts) == 1 and parts[0] > 0:
-            return (parts[0], parts[0])
-        if len(parts) == 2 and parts[0] > 0 and parts[1] > 0:
-            return (parts[0], parts[1])
-        raise ValueError(f"Invalid --cell-size {raw!r}; expected '40' or '40,40'")
-    tok_path = Path(tokenizer_ref)
-    if tok_path.is_dir():
-        try:
-            return read_image_cell_size(tok_path)
-        except (FileNotFoundError, ValueError):
-            pass
-    return DEFAULT_INKLING_CELL_SIZE
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(description="Export Halo SFT or VLM SMPO Arrow DatasetDict.")
     parser.add_argument("--mode", choices=("sft", "preference"), required=True)
@@ -77,7 +60,7 @@ def main() -> int:
     count_fn = lambda s: len(tok(s, add_special_tokens=False)["input_ids"])
     train_rows = _resolve_row_paths(_load_jsonl(args.train_jsonl), args.train_jsonl, args.image_root)
     val_rows = _resolve_row_paths(_load_jsonl(args.val_jsonl), args.val_jsonl, args.image_root)
-    cell_size = _parse_cell_size(args.cell_size, args.tokenizer)
+    cell_size = parse_cell_size(args.cell_size, args.tokenizer)
 
     vision_tokens = args.vision_tokens
     if args.measure_vision_tokens and train_rows:

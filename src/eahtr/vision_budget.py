@@ -81,6 +81,25 @@ def read_image_cell_size(model_dir_or_cfg: Path | str | Mapping[str, Any]) -> tu
     raise ValueError(f"Cannot infer image cell size from processor config keys: {sorted(ip.keys())}")
 
 
+def parse_cell_size(raw: str | None, tokenizer_ref: str | None = None) -> tuple[int, int]:
+    """Parse ``--cell-size`` ('W,H' or 'N') or infer cell geometry from a staged tokenizer dir."""
+    if raw:
+        parts = [int(x.strip()) for x in raw.lower().replace("x", ",").split(",") if x.strip()]
+        if len(parts) == 1 and parts[0] > 0:
+            return (parts[0], parts[0])
+        if len(parts) == 2 and parts[0] > 0 and parts[1] > 0:
+            return (parts[0], parts[1])
+        raise ValueError(f"Invalid --cell-size {raw!r}; expected '40' or '40,40'")
+    if tokenizer_ref:
+        tok_path = Path(tokenizer_ref)
+        if tok_path.is_dir():
+            try:
+                return read_image_cell_size(tok_path)
+            except (FileNotFoundError, ValueError):
+                pass
+    return DEFAULT_INKLING_CELL_SIZE
+
+
 def count_grid_image_tokens(width: int, height: int, *, cell_w: int = 40, cell_h: int = 40) -> int:
     """Count realized grid image tokens with ceiling padding to cell boundaries."""
     if width <= 0 or height <= 0 or cell_w <= 0 or cell_h <= 0:

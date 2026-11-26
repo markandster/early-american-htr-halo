@@ -51,7 +51,9 @@ def load_eval_manifest(
     for row in rows:
         item = dict(row)
         raw_img = str(item.get("image_path") or "").strip()
-        if image_root is not None or (raw_img and not Path(raw_img).is_absolute()):
+        if not raw_img:
+            raise ValueError(f"Missing image_path for record_id={item.get('record_id')!r} in {eval_jsonl}")
+        if image_root is not None or not Path(raw_img).is_absolute():
             item["image_path"] = str(resolve_manifest_image_path(raw_img, eval_jsonl, image_root))
         resolved_rows.append(item)
     return resolved_rows

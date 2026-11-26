@@ -15,6 +15,7 @@ from eahtr.vision_budget import (
     count_grid_image_tokens,
     encode_image_for_vlm,
     measure_max_vision_tokens,
+    parse_cell_size,
     read_image_cell_size,
     resize_image_for_token_budget,
 )
@@ -277,3 +278,39 @@ def test_streaming_export_with_budget_and_cli_image_root(tmp_path: Path, monkeyp
     assert exp_cli.main() == 0
     assert saved[-1]["train"].data["images"][0][0]["bytes"] == b"PNG_OUT"
     assert seen_cache_dirs and not Path(seen_cache_dirs[-1]).exists()
+
+    # Preference mode streaming export with --max-image-tokens and parse_cell_size
+    assert parse_cell_size("40x40") == (40, 40)
+    with pytest.raises(ValueError, match="Invalid --cell-size"):
+        parse_cell_size("0")
+    pref_tr = tmp_path / "pref_train.jsonl"
+    pref_va = tmp_path / "pref_val.jsonl"
+    pref_row = {
+        "document_id": "d1",
+        "writer_key": "w1",
+        "split": "train",
+        "image_path": "rel/tr.jpg",
+        "prompt": [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": "Transcribe."}]}],
+        "chosen": [{"role": "assistant", "content": "Dear Sir"}],
+        "rejected": [{"role": "assistant", "content": "Bad"}],
+        "margin": 0.7,
+    }
+    pref_tr.write_text(json.dumps({**pref_row, "record_id": "pt1"}) + "\n", encoding="utf-8")
+    pref_va.write_text(json.dumps({**pref_row, "record_id": "pv1", "document_id": "d2", "writer_key": "w2", "image_path": "rel/va.jpg", "split": "val"}) + "\n", encoding="utf-8")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "export_halo_datasets.py",
+            "--mode", "preference",
+            "--train-jsonl", str(pref_tr),
+            "--val-jsonl", str(pref_va),
+            "--out-dir", str(tmp_path / "pref_arrow_out"),
+            "--tokenizer", "stub/inkling",
+            "--image-root", str(img_root),
+            "--max-image-tokens", "16",
+            "--cell-size", "40",
+        ],
+    )
+    assert exp_cli.main() == 0
+    assert saved[-1]["train"].data["images"][0][0]["bytes"] == b"PNG_OUT"

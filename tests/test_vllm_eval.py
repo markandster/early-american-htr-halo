@@ -260,3 +260,89 @@ def test_eval_vllm_server_cli_parity_reasoning_leak_and_swap(tmp_path: Path, mon
         ["eval_vllm_server.py", "--base-url", "http://127.0.0.1:8000", "--model", "m", "--eval-jsonl", str(test_jsonl), "--out-json", str(out_json)],
     )
     assert cli.main() == 2
+
+    # Missing image_path fails closed inside manifest validation (exit 2)
+    bad_img_jsonl = tmp_path / "missing_img.jsonl"
+    bad_img_jsonl.write_text(json.dumps({"record_id": "x1", "document_id": "d1", "split": "val", "text": "Dear Sir"}) + "\n", encoding="utf-8")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["eval_vllm_server.py", "--base-url", "http://127.0.0.1:8000", "--model", "m", "--eval-jsonl", str(bad_img_jsonl), "--out-json", str(out_json)],
+    )
+    assert cli.main() == 2
+
+    # With --tokenizer set, prompt_tokens outside tolerance fails closed while aligned count passes
+    class _TokParity:
+        image_token_id = 200054
+
+        @classmethod
+        def from_pretrained(cls, path: str) -> "_TokParity":
+            return cls()
+
+        def apply_chat_template(self, msgs: object, tokenize: bool = True, add_generation_prompt: bool = True) -> list[int]:
+            return [1, 200054, 2, 3, 4]  # 4 non-image text tokens
+
+    fake_tf = types.ModuleType("transformers")
+    fake_tf.AutoTokenizer = _TokParity  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "transformers", fake_tf)
+
+    # 80x80 -> 4 img tokens + 4 text tokens = 8 expected; 90 exceeds tol=8
+    monkeypatch.setattr(
+        "eahtr.vllm_client.urlopen",
+        lambda req, timeout=0: _FakeResp({"choices": [{"finish_reason": "stop", "message": {"content": "Dear Sir"}}], "usage": {"prompt_tokens": 90, "completion_tokens": 2}}),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["eval_vllm_server.py", "--base-url", "http://127.0.0.1:8000", "--model", "m", "--eval-jsonl", str(val_jsonl), "--image-root", str(img_dir), "--out-json", str(out_json), "--cell-size", "40", "--tokenizer", "stub/ink", "--prompt-token-tolerance", "8"],
+    )
+    with pytest.raises(RuntimeError, match="prompt_tokens parity drift"):
+        cli.main()
+
+
+def test_halo_launcher_ep_parity_and_fresh_dir_guards(tmp_path: Path) -> None:
+    import os
+    import subprocess
+
+    repo_root = Path(__file__).resolve().parents[1]
+    ds_dir = tmp_path / "ds"
+    ds_dir.mkdir()
+    non_empty_out = tmp_path / "stale_adapter"
+    non_empty_out.mkdir()
+    (non_empty_out / "checkpoint-99").mkdir()
+
+    # Non-empty ADAPTER_DIR without RESUME=1 fails fast on both launchers
+    for script_name, extra in (("run_gemma4_halo.sh", {"MODEL_SIZE": "26b_a4b", "NUM_GPUS": "8"}), ("run_inkling2_halo.sh", {"NUM_GPUS": "8"})):
+        env = {**os.environ, "DATASET_DIR": str(ds_dir), "ADAPTER_DIR": str(non_empty_out), **extra}
+        res = subprocess.run(["bash", str(repo_root / "scripts" / script_name)], env=env, capture_output=True, text=True)
+        assert res.returncode != 0 and "non-empty" in res.stderr
+
+    # Existing ENGINE_ADAPTER_DIR fails fast on Inkling launcher
+    existing_engine = tmp_path / "existing_engine"
+    existing_engine.mkdir()
+    fresh_adapter = tmp_path / "fresh_inkling_adapter"
+    env_eng = {**os.environ, "DATASET_DIR": str(ds_dir), "ADAPTER_DIR": str(fresh_adapter), "ENGINE_ADAPTER_DIR": str(existing_engine), "NUM_GPUS": "8"}
+    res_eng = subprocess.run(["bash", str(repo_root / "scripts" / "run_inkling2_halo.sh")], env=env_eng, capture_output=True, text=True)
+    assert res_eng.returncode != 0 and "already exists" in res_eng.stderr
+
+    # EP=4 on NUM_GPUS=8 fails closed on both launchers before touching Halo or weights
+    for script_name, extra in (("run_gemma4_halo.sh", {"MODEL_SIZE": "26b_a4b"}), ("run_inkling2_halo.sh", {})):
+        fresh_dir = tmp_path / f"ep_{script_name}"
+        fresh_eng = tmp_path / f"eng_{script_name}"
+        res_ep = subprocess.run(
+            ["bash", str(repo_root / "scripts" / script_name)],
+            env={
+                **os.environ,
+                "PYTHON_BIN": sys.executable,
+                "WORK_DIR": str(tmp_path / f"work_{script_name}"),
+                "DATASET_DIR": str(ds_dir),
+                "ADAPTER_DIR": str(fresh_dir),
+                "ENGINE_ADAPTER_DIR": str(fresh_eng),
+                "EP_SIZE": "4",
+                "NUM_GPUS": "8",
+                **extra,
+            },
+            capture_output=True,
+            text=True,
+        )
+        assert res_ep.returncode != 0 and "Invalid GPU count" in res_ep.stderr

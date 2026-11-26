@@ -17,26 +17,8 @@ from eahtr.eval_harness import (
     score_eval_predictions,
     write_json_atomic,
 )
-from eahtr.vision_budget import DEFAULT_INKLING_CELL_SIZE, encode_image_for_vlm, read_image_cell_size
+from eahtr.vision_budget import encode_image_for_vlm, parse_cell_size
 from eahtr.vllm_client import VLLMClient, VLLMClientError, validate_vllm_engine_adapter_dir
-
-
-def _parse_cell_size(raw: str | None, tokenizer_ref: str | None) -> tuple[int, int]:
-    if raw:
-        parts = [int(x.strip()) for x in raw.lower().replace("x", ",").split(",") if x.strip()]
-        if len(parts) == 1 and parts[0] > 0:
-            return (parts[0], parts[0])
-        if len(parts) == 2 and parts[0] > 0 and parts[1] > 0:
-            return (parts[0], parts[1])
-        raise ValueError(f"Invalid --cell-size {raw!r}; expected '40' or '40,40'")
-    if tokenizer_ref:
-        tok_path = Path(tokenizer_ref)
-        if tok_path.is_dir():
-            try:
-                return read_image_cell_size(tok_path)
-            except (FileNotFoundError, ValueError):
-                pass
-    return DEFAULT_INKLING_CELL_SIZE
 
 
 def _count_expected_prompt_text_tokens(tokenizer_ref: str) -> int:
@@ -110,7 +92,7 @@ def main() -> int:
         if args.baseline_predictions is not None:
             eval_ids = [str(r["record_id"]).strip() for r in rows]
             base_map = load_baseline_cer_map(args.baseline_predictions, eval_ids)
-        cell_size = _parse_cell_size(args.cell_size, args.tokenizer)
+        cell_size = parse_cell_size(args.cell_size, args.tokenizer)
         if args.engine_adapter_dir is not None:
             validate_vllm_engine_adapter_dir(args.engine_adapter_dir)
     except (FileNotFoundError, ValueError) as exc:
