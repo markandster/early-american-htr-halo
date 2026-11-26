@@ -5,7 +5,7 @@ Development tuning, ablations, and checkpoint selection run exclusively on **`va
 Every reported evaluation records:
 - **Strict & Lenient WER / CER:** Strict preserves case, punctuation, period spelling, and line breaks (`Unicode NFC`); lenient strips punctuation and lowercases; zero-shot baselines also report dual-convention `raw_strict_cer_pct` against uncleaned XML.
 - **Line-Break & Order Metrics:** `newline_cer_pct`, `line_boundary_f1_pct`, and `order_tolerant_cer_pct` (`eahtr.metrics.score_line_breaks`).
-- **Causal & Statistical Controls:** Matched-compute Halo sham control (full-mode Colab `sham_short`, capped at `<= 512` pages, is a short unmatched control; smoke mode matches `real` at `128`), same-checkpoint **image-swap delta** (`swap_cer_degradation`), and clustered 95% **paired bootstrap CIs** (`paired_bootstrap_ci` by `document_id`, weighted by normalized `ref_chars` with pre-inference unique 1-to-1 baseline `record_id` matching).
+- **Causal & Statistical Controls:** Planned matched-compute Halo sham control (full-mode Colab `sham_short`, capped at `<= 512` pages, is a short unmatched control; smoke mode matches `real` at `128`), same-checkpoint **image-swap delta** (`swap_cer_degradation` via `merge_and_eval_halo.py --swap-images`), and clustered 95% **paired bootstrap CIs** (`paired_bootstrap_ci` by `document_id`, weighted by normalized `ref_chars` with pre-inference unique 1-to-1 baseline `record_id` matching).
 - **Decoding Health Denominators:** Separately reports `loop_pages`, `budget_capped_pages`, `non_terminated_pages`, `editorial_leaks`, `modernizations`, `thinking_leak_pages`, and mean `eahtr.rewards`.
 
 ## Leaderboard & Ablation Tracker
@@ -13,7 +13,7 @@ Every reported evaluation records:
 | Model | Stage / Arm | Split Scope | Strict WER / CER | Newline F1 / Order-Tol CER | Swap Δ / 95% CI | Loop / Cap Pages | Mean Reward | Local MLX (`<= 24 GB`) | Notes |
 |---|---|---|---|---|---|---|---|---|---|
 | `google/gemma-4-12B-it` | Zero-shot baseline (cleaned + raw) | `revcity-val` / frozen `test_public` | _pending_ | _pending_ | — | _pending_ | _pending_ | — | Primary track; 1120 soft tokens, `sdpa`, dual-convention |
-| `google/gemma-4-12B-it` | Matched-compute sham (Halo) / short unmatched control (`sham_short` in full Colab) | `revcity-val` / frozen `test_public` | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | — | Proves image-conditioned learning; full Colab `sham_short` capped `<= 512` pages |
+| `google/gemma-4-12B-it` | Planned matched-compute sham (Halo) / short unmatched control (`sham_short` in full Colab) | `revcity-val` / frozen `test_public` | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | — | Proves image-conditioned learning; full Colab `sham_short` capped `<= 512` pages |
 | `google/gemma-4-12B-it` | Stage 1 VLM SFT (Halo Primary) | `revcity-val` / frozen `test_public` | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ (8-bit <= 12.5 GiB) | Non-thinking parity template, trainable vision |
 | `google/gemma-4-12B-it` | Stage 2 VLM SMPO (Conditional) | `revcity-val` / frozen `test_public` | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | Merged Stage 1 start + `chosen_sft_ratio: 1.0`; promoted only if `val` improves |
 | `google/gemma-4-12B-it` | LOC Genre-Shift Challenge | `challenge_loc` | _pending_ | _pending_ | — | _pending_ | _pending_ | — | Out-of-distribution Public Domain panel |

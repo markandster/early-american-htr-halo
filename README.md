@@ -13,12 +13,12 @@ Off-the-shelf document OCR models trained on modern printed text perform poorly 
 
 1. **Absorbing Repetition Loops:** Line-wrap hyphens (`con-\n`) and tabular leader dots can trap autoregressive decoders in hundreds of consecutive `-` lines or token-cap non-termination.
 2. **Modernization Drift:** Language priors silently "autocorrect" period orthography (`chear` → `cheer`, `usefull` → `useful`, `publick` → `public`).
-3. **Editorial Bracket Leakage:** Unstripped `[...]` editorial insertions and placeholder tokens bleed from archival XML conventions into clean manuscript transcriptions.
+3. **Markup & Bracket Leakage:** Unstripped `[...]` crossed-out deletions, damage brackets, and placeholder tokens bleed from archival XML conventions into clean manuscript transcriptions.
 4. **Premature Truncation & Blank-Page Hallucinations:** Stopping mid-letter or emitting archive boilerplate on blank versos.
 
-This project post-trains models strictly for writer-general diplomatic transcription preserving period spelling, capitalization, punctuation, abbreviations, and exact physical line breaks (`\n`), pairing **full-resolution trainable-vision SFT** (`scripts/training/sft.py`) with **conditional verifiable Stage 2 VLM SMPO** (`scripts/training/preference/smpo.py` with `chosen_sft_ratio: 1.0`, promoted only if `val` CER improves cleanly over Stage 1) scored deterministically by `eahtr.rewards` / `eahtr.preferences.build_preference_pairs`. *(Text-only Halo GRPO configs are kept as contingency recipes.)*
+This project post-trains models for diplomatic transcription evaluated on document-group disjoint (and optional creator-disjoint) splits, preserving period spelling, capitalization, punctuation, abbreviations, and exact physical line breaks (`\n`) and pairing **full-resolution trainable-vision SFT** (`scripts/training/sft.py`) with **conditional verifiable Stage 2 VLM SMPO** (`scripts/training/preference/smpo.py` with `chosen_sft_ratio: 1.0`, promoted only if `val` CER improves cleanly over Stage 1) scored deterministically by `eahtr.rewards` / `eahtr.preferences.build_preference_pairs`. *(Text-only Halo GRPO configs are kept as contingency recipes.)*
 
-See [docs/BACKGROUND.md](docs/BACKGROUND.md) for the pre-competition empirical motivation—how earlier exploratory HTR runs exposed absorbing dash loops, editorial bracket leakage, and unseen-writer reversals despite validation gains.
+See [docs/BACKGROUND.md](docs/BACKGROUND.md) for the pre-competition empirical motivation—how earlier exploratory HTR runs exposed absorbing dash loops, bracket markup leakage, and unseen-writer reversals despite validation gains.
 
 ---
 

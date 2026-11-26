@@ -1,6 +1,6 @@
 # Halo Competition Training Plan (`early-american-htr-halo`)
 
-This document is the execution-ready, public training and engineering plan for **writer-general 18th-century diplomatic handwriting recognition** (c. 1750–1800 English round hand) using [White Circle Halo](https://github.com/whitecircle/halo).
+This document is the execution-ready, public training and engineering plan for **18th-century diplomatic handwriting recognition** (c. 1750–1800 English round hand, evaluated on document-group disjoint and optional creator-disjoint splits) using [White Circle Halo](https://github.com/whitecircle/halo).
 
 > **Model & Stage Sequence:** Commit **Gemma 4 `12B` (`google/gemma-4-12B-it`)** as the primary submit-ready entry (Stage 1 full-res trainable-vision SFT → optional Stage 2 VLM SMPO with `chosen_sft_ratio: 1.0`, promoted only if it beats continued gold SFT on validation deployment failures). Treat **Inkling 2 (`thinkingmachines/Inkling-2-Small`, image-conditioned with frozen vision)** strictly as **conditional** on passing a bounded Dec 1 cluster train → `export-engine-adapter` → `halo:vllm-0.1.dev25249` serving pilot (Stage 1 SFT alone unless trainable expert-shard reload is proven).
 

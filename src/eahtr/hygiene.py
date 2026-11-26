@@ -1,4 +1,4 @@
-"""Target text hygiene, copy-slip filtering, and writer-disjoint split auditing."""
+"""Target text hygiene, copy-slip filtering, and document-group / writer-disjoint split auditing."""
 
 from __future__ import annotations
 
