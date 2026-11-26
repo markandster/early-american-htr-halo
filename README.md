@@ -43,7 +43,7 @@ All competition and public training recipes enforce a strict license allowlist (
 - **Strict Dev vs. Frozen Test Discipline:** Development notebooks and sweeps score **`val` only** (with hash-keyed caches and same-checkpoint image-swap causal checks; Stage-2 preference rollouts use strictly held-out `oof_train` shards); `test_public` remains untouched until final checkpoint freeze.
 - **Opt-in Hugging Face Hub Export (`PUBLISH_TO_HF_DATASET = False`):** Validates **all pairwise splits** (`train` vs `val`, `train` vs `test_public`, `val` vs `test_public`) via `eahtr.hf_dataset` and emits Halo-ready `messages` + `images` (`Sequence(Image())`) columns.
 
-All splits enforce hard disjointness via `eahtr.hygiene.audit_split_disjointness` across `document_id`, `writer_key`, `image_sha256`, normalized exact-text hashes (`>= 8` words), and 32-word SHA-256 n-grams, plus advisory perceptual `dHash` review (`dhash_review_candidates`, Hamming `<= 4`).
+All splits enforce hard disjointness via `eahtr.hygiene.audit_split_disjointness` across `document_id`, `writer_key`, `image_sha256`, normalized exact-text hashes (`>= 8` words), and 32-word SHA-256 n-grams, plus advisory perceptual `dHash` review (`dhash_review_candidates`, Hamming `<= 4`). See [docs/DATA_SHEET.md](docs/DATA_SHEET.md) for the full corpus breakdown and reporting caveats.
 
 ---
 
@@ -65,6 +65,8 @@ See [docs/TRAINING_PLAN.md](docs/TRAINING_PLAN.md) for the full competition trai
 ├── configs/halo/                 # Halo SFT, VLM SMPO, contingency GRPO YAMLs & Jinja templates
 ├── docs/
 │   ├── BACKGROUND.md             # Pre-competition prior HTR findings & design rationale
+│   ├── DATA_SHEET.md             # Corpus provenance, split breakdown, & reporting caveats
+│   ├── REPRODUCIBILITY.md        # Clean-machine pinned setup & end-to-end rerun commands
 │   └── TRAINING_PLAN.md          # Full competition training plan & verification ledger
 ├── notebooks/
 │   ├── colab_competition_pretrain_sft.ipynb  # Public-corpus Colab SFT, val eval, & Stage-2 rollouts
@@ -86,6 +88,8 @@ See [docs/TRAINING_PLAN.md](docs/TRAINING_PLAN.md) for the full competition trai
 ---
 
 ## Validation & Quickstart
+
+See [docs/REPRODUCIBILITY.md](docs/REPRODUCIBILITY.md) for the complete pinned-version clean-machine runbook.
 
 Run unit tests and Tier-1 static validation locally:
 
