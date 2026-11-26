@@ -6,11 +6,13 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HALO_DIR="${HALO_DIR:-/tmp/halo}"
-HALO_COMMIT="${HALO_COMMIT:-53fe34a}"
+HALO_COMMIT="${HALO_COMMIT:-53fe34adcc4ef4bef9979ffaa1d50b5b5d4948b2}"
 GEMMA4_12B_REV="${GEMMA4_12B_REV:-43c9d014b231}"
 SMOKE_VENV="${SMOKE_VENV:-/tmp/halo-gpu-smoke-venv}"
 WORK_DIR="${WORK_DIR:-/tmp/eahtr_halo_smoke}"
-mkdir -p "${WORK_DIR}"
+OUTPUT_DIR="${OUTPUT_DIR:-${WORK_DIR}}"
+MAX_STEPS="${MAX_STEPS:-5}"
+mkdir -p "${WORK_DIR}" "${OUTPUT_DIR}"
 
 if ! command -v nvidia-smi >/dev/null 2>&1; then
   echo "ERROR: nvidia-smi not found; 1x CUDA GPU required for live Halo smoke run." >&2
@@ -22,10 +24,10 @@ VRAM_MIB="$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | 
 VRAM_GB="$(python3 -c "print(round(${VRAM_MIB} / 1024.0, 2))")"
 echo "Detected NVIDIA driver=${DRIVER_VER}, VRAM=${VRAM_GB} GiB"
 
-if [[ ! -d "${HALO_DIR}/halo" ]]; then
-  git clone --depth 50 https://github.com/whitecircle/halo.git "${HALO_DIR}"
+if [[ ! -d "${HALO_DIR}/.git" ]]; then
+  git clone --filter=blob:none --no-checkout https://github.com/whitecircle/halo.git "${HALO_DIR}"
 fi
-git -C "${HALO_DIR}" fetch --tags --quiet || true
+git -C "${HALO_DIR}" fetch --depth 1 origin "${HALO_COMMIT}"
 git -C "${HALO_DIR}" checkout "${HALO_COMMIT}"
 
 REUSE_VENV="${REUSE_VENV:-0}"
@@ -82,6 +84,7 @@ from eahtr.halo_smoke import (
 )
 
 work = Path("${WORK_DIR}")
+out_root = Path("${OUTPUT_DIR}")
 repo = Path("${REPO_ROOT}")
 vram_gb = float("${VRAM_GB}")
 records = fetch_revcity_smoke_sample(REVCITY_ZENODO_URL, work / "images", max_pages=32)
@@ -131,23 +134,24 @@ print(f"Verified Halo VLMDataCollator batch-0 (proc={realized_toks}, batch={b0_i
 sft_yaml, smpo_yaml = build_smoke_yaml_configs(
     repo / "configs" / "halo" / "gemma4_12b_sft.yaml",
     repo / "configs" / "halo" / "gemma4_12b_vlm_smpo.yaml",
-    work / "configs", model_dir=staged_dir, smpo_model_dir=work / "configs" / "sft_merged",
+    out_root / "configs", model_dir=staged_dir, smpo_model_dir=out_root / "configs" / "sft_merged",
     sft_dataset_dir=sft_ds, smpo_dataset_dir=smpo_ds, vram_gb=vram_gb, repo_root=repo,
+    max_steps=int("${MAX_STEPS}"),
 )
 print(f"Prepared smoke YAMLs (dropped={dropped}): {sft_yaml} | {smpo_yaml}")
 PY
 
 cd "${REPO_ROOT}"
-"${SMOKE_VENV}/bin/python" "${REPO_ROOT}/scripts/validate_halo_configs.py" --config-dir "${WORK_DIR}/configs" --halo-repo "${HALO_DIR}"
+"${SMOKE_VENV}/bin/python" "${REPO_ROOT}/scripts/validate_halo_configs.py" --config-dir "${OUTPUT_DIR}/configs" --halo-repo "${HALO_DIR}"
 
-HALO_FLEX_SLIDING="${FLEX_ENV}" "${SMOKE_VENV}/bin/python" "${HALO_DIR}/scripts/training/sft.py" "${WORK_DIR}/configs/smoke_sft.yaml" 2>&1 | tee "${WORK_DIR}/configs/sft_run.log"
-"${SMOKE_VENV}/bin/python" -c "from pathlib import Path; from eahtr.halo_smoke import verify_halo_run_log_finite_loss; print('SFT losses:', verify_halo_run_log_finite_loss(Path('${WORK_DIR}/configs/sft_run.log'), min_steps=5))"
+HALO_FLEX_SLIDING="${FLEX_ENV}" "${SMOKE_VENV}/bin/python" "${HALO_DIR}/scripts/training/sft.py" "${OUTPUT_DIR}/configs/smoke_sft.yaml" 2>&1 | tee "${OUTPUT_DIR}/configs/sft_run.log"
+"${SMOKE_VENV}/bin/python" -c "from pathlib import Path; from eahtr.halo_smoke import verify_halo_run_log_finite_loss; print('SFT losses:', verify_halo_run_log_finite_loss(Path('${OUTPUT_DIR}/configs/sft_run.log'), min_steps=int('${MAX_STEPS}')))"
 
-RESOLVED_SFT_ADAPTER="$("${SMOKE_VENV}/bin/python" -c "from pathlib import Path; d=Path('${WORK_DIR}/configs/sft_out'); cands=[d]+[p for p in sorted(d.glob('checkpoint-*'), key=lambda p: int(p.name.split('-')[-1]) if p.name.split('-')[-1].isdigit() else -1, reverse=True) if p.is_dir()]; print(next(str(p) for p in cands if (p/'adapter_model.safetensors').is_file()))")"
+RESOLVED_SFT_ADAPTER="$("${SMOKE_VENV}/bin/python" -c "from pathlib import Path; d=Path('${OUTPUT_DIR}/configs/sft_out'); cands=[d]+[p for p in sorted(d.glob('checkpoint-*'), key=lambda p: int(p.name.split('-')[-1]) if p.name.split('-')[-1].isdigit() else -1, reverse=True) if p.is_dir()]; print(next(str(p) for p in cands if (p/'adapter_model.safetensors').is_file()))")"
 echo "Merging Stage 1 SFT adapter (${RESOLVED_SFT_ADAPTER}) via Halo merge_peft_adapters.py..."
 "${SMOKE_VENV}/bin/python" "${HALO_DIR}/scripts/after_training/merge_peft_adapters.py" \
-  --adapter_dir "${RESOLVED_SFT_ADAPTER}" --output_dir "${WORK_DIR}/configs/sft_merged"
-"${SMOKE_VENV}/bin/python" "${REPO_ROOT}/scripts/verify_mlx_export.py" "${WORK_DIR}/configs/sft_merged" --reference-dir "${RESOLVED_SFT_ADAPTER}"
+  --adapter_dir "${RESOLVED_SFT_ADAPTER}" --output_dir "${OUTPUT_DIR}/configs/sft_merged"
+"${SMOKE_VENV}/bin/python" "${REPO_ROOT}/scripts/verify_mlx_export.py" "${OUTPUT_DIR}/configs/sft_merged" --reference-dir "${RESOLVED_SFT_ADAPTER}"
 
 echo "Checking Stage 1 -> Stage 2 fresh-process log-prob continuity and stop termination..."
 HALO_FLEX_SLIDING="${FLEX_ENV}" "${SMOKE_VENV}/bin/python" - <<PY
@@ -162,6 +166,7 @@ from eahtr.candidates import DIPLOMATIC_PROMPT
 from eahtr.halo_smoke import verify_stage_continuity_logprobs
 
 work = Path("${WORK_DIR}")
+out_root = Path("${OUTPUT_DIR}")
 sft_ds_path = work / "datasets" / "halo_vlm_sft_smoke"
 ds = load_from_disk(str(sft_ds_path))["train"]
 sample_rows = [ds[0], ds[min(1, len(ds) - 1)]]
@@ -198,7 +203,9 @@ def _stop_ids(tok, gen_cfg=None) -> set[int]:
             ids.add(tid)
     return ids
 
-def _score_examples(model_path: Path, *, adapter_dir: Path | None = None, check_generate: bool = False) -> list[float]:
+def _score_examples(
+    model_path: Path, *, adapter_dir: Path | None = None, check_generate: bool = False, fp32_norms_autocast: bool = False
+) -> list[float]:
     proc = AutoProcessor.from_pretrained(str(model_path))
     load_kw = {"torch_dtype": torch.bfloat16, "device_map": "auto", "attn_implementation": "sdpa"}
     if bnb_cfg is not None:
@@ -206,10 +213,15 @@ def _score_examples(model_path: Path, *, adapter_dir: Path | None = None, check_
     mdl = AutoModelForImageTextToText.from_pretrained(str(model_path), **load_kw)
     if adapter_dir is not None:
         mdl = PeftModel.from_pretrained(mdl, str(adapter_dir))
+    if fp32_norms_autocast:
+        for mod_name, mod in mdl.named_modules():
+            if "norm" in mod_name.lower():
+                mod.to(torch.float32)
     mdl.eval()
     collected: list[float] = []
     tok = getattr(proc, "tokenizer", proc)
-    with torch.no_grad():
+    autocast_ctx = torch.amp.autocast("cuda", dtype=torch.bfloat16) if fp32_norms_autocast else torch.no_grad()
+    with torch.no_grad(), autocast_ctx:
         for row in sample_rows:
             img = row["images"][0].convert("RGB")
             ref_text = row["messages"][1]["content"][0]["text"]
@@ -248,7 +260,10 @@ def _score_examples(model_path: Path, *, adapter_dir: Path | None = None, check_
 
 base_lps = _score_examples(work / "gemma4_12b_highres")
 live_sft_lps = _score_examples(work / "gemma4_12b_highres", adapter_dir=Path("${RESOLVED_SFT_ADAPTER}"))
-sft_lps = _score_examples(work / "configs" / "sft_merged", check_generate=True)
+sft_lps = _score_examples(out_root / "configs" / "sft_merged", check_generate=True)
+sft_lps_for_stage2 = (
+    _score_examples(out_root / "configs" / "sft_merged", fp32_norms_autocast=True) if vram_gb < 56.0 else sft_lps
+)
 sft_shift = max(abs(a - b) for a, b in zip(base_lps, sft_lps))
 merge_diff = max(abs(a - b) for a, b in zip(live_sft_lps, sft_lps))
 if merge_diff > 0.05:
@@ -267,13 +282,14 @@ from halo.configs.script_arguments import ModelArguments
 from halo.entrypoints.data_setup import apply_vision_options, load_script_datasets, prepare_script_preference_data, resolve_preference_vlm_run
 from halo.entrypoints.model_setup import apply_max_length, apply_text_path_padding_side, default_padded_attn_implementation, install_resolved_tokenizer, load_policy_model
 from halo.entrypoints.script import configure_balancing_and_build_callbacks, distributed_trainer_kwargs, init_training_script, parse_script_args
-from halo.model_loading.parallel.peft_setup import configure_adapter_training
+from halo.model_loading.parallel.peft_setup import configure_adapter_training, peft_bf16_autocast
 from halo.trainers.preference.smpo import SMPOTrainer
 from eahtr.candidates import DIPLOMATIC_PROMPT
 
-work = Path(sys.argv[1])
-probe_out = Path(sys.argv[2])
-sys.argv = ["smpo.py", str(work / "configs" / "smoke_vlm_smpo.yaml")]
+sft_ds_dir = Path(sys.argv[1])
+smpo_yaml = Path(sys.argv[2])
+probe_out = Path(sys.argv[3])
+sys.argv = ["smpo.py", str(smpo_yaml)]
 s_args, s_cfg, m_cfg, d_args = parse_script_args(SMPOScriptArguments, SMPOConfig, ModelArguments, ParallelismArguments)
 ctx = init_training_script(s_args, s_cfg, m_cfg, d_args, script_prefix="smpo", trainer_cls=SMPOTrainer)
 ds_s, ds_presharded = load_script_datasets(s_args, ctx.parallelism_config)
@@ -292,11 +308,11 @@ trainer = SMPOTrainer(
     **distributed_trainer_kwargs(s_args, ctx.parallelism_config, dataset_presharded=ds_presharded), is_vlm=is_vlm_s,
 )
 mdl = trainer.model
-ds_rows = load_from_disk(str(work / "datasets" / "halo_vlm_sft_smoke"))["train"]
+ds_rows = load_from_disk(str(sft_ds_dir))["train"]
 sample_rows = [ds_rows[0], ds_rows[min(1, len(ds_rows) - 1)]]
 collected = []
 mdl.eval()
-with torch.no_grad():
+with torch.no_grad(), peft_bf16_autocast(getattr(trainer, "_peft_has_been_casted_to_bf16", False), mdl.device):
     for row in sample_rows:
         img = row["images"][0].convert("RGB")
         ref_text = row["messages"][1]["content"][0]["text"]
@@ -310,21 +326,21 @@ with torch.no_grad():
         collected.extend(float(x) for x in lps[:16].cpu().tolist())
 probe_out.write_text(json.dumps(collected), encoding="utf-8")
 """
-probe_json = work / "configs" / "stage2_probe_lps.json"
-gate_fail_file = work / "configs" / "continuity_gate_failure.txt"
+probe_json = out_root / "configs" / "stage2_probe_lps.json"
+gate_fail_file = out_root / "configs" / "continuity_gate_failure.txt"
 if gate_fail_file.exists():
     gate_fail_file.unlink()
-subprocess.check_call([sys.executable, "-c", stage2_probe, str(work), str(probe_json)])
+subprocess.check_call([sys.executable, "-c", stage2_probe, str(sft_ds_path), str(out_root / "configs" / "smoke_vlm_smpo.yaml"), str(probe_json)])
 stage2_lps = json.loads(probe_json.read_text(encoding="utf-8"))
 base_tol = 0.05 if vram_gb >= 56.0 else 0.15
 s2_tol = min(0.15 if vram_gb >= 56.0 else 0.35, max(base_tol, 0.4 * sft_shift))
 stage2_vs_base_diff = max(abs(a - b) for a, b in zip(base_lps, stage2_lps))
 gate_errors = []
 try:
-    report = verify_stage_continuity_logprobs(base_lps, sft_lps, stage2_lps, tol=s2_tol)
+    report = verify_stage_continuity_logprobs(base_lps, sft_lps_for_stage2, stage2_lps, tol=s2_tol)
 except Exception as exc:
     report = {
-        "max_step0_diff": max(abs(a - b) for a, b in zip(sft_lps, stage2_lps)),
+        "max_step0_diff": max(abs(a - b) for a, b in zip(sft_lps_for_stage2, stage2_lps)),
         "sft_shift": sft_shift,
     }
     gate_errors.append(str(exc))
@@ -343,17 +359,18 @@ if report["max_step0_diff"] >= 0.5 * sft_shift:
 report["s2_tol"] = round(s2_tol, 6)
 report["stage2_vs_base_diff"] = round(stage2_vs_base_diff, 6)
 report["live_vs_merged_diff"] = merge_diff
+report["sft_norm_cast_matched"] = vram_gb < 56.0
 if gate_errors:
     msg = " | ".join(gate_errors)
     gate_fail_file.write_text(msg, encoding="utf-8")
-    print(f"[ERROR] Stage 2 continuity gate failed (continuing to smpo.py so 5-step SMPO evidence is still collected): {msg}", file=sys.stderr)
+    print(f"[ERROR] Stage 2 continuity gate failed (continuing to smpo.py so ${MAX_STEPS}-step SMPO evidence is still collected): {msg}", file=sys.stderr)
 else:
     print("Verified Stage 1->2 continuity (via Halo SMPOTrainer):", report)
 PY
 
-HALO_FLEX_SLIDING="${FLEX_ENV}" "${SMOKE_VENV}/bin/python" "${HALO_DIR}/scripts/training/preference/smpo.py" "${WORK_DIR}/configs/smoke_vlm_smpo.yaml" 2>&1 | tee "${WORK_DIR}/configs/smpo_run.log"
-"${SMOKE_VENV}/bin/python" -c "from pathlib import Path; from eahtr.halo_smoke import verify_halo_run_log_finite_loss; print('SMPO losses:', verify_halo_run_log_finite_loss(Path('${WORK_DIR}/configs/smpo_run.log'), min_steps=5))"
-if [[ -f "${WORK_DIR}/configs/continuity_gate_failure.txt" ]]; then
-  echo "ERROR: Stage 2 continuity gate failed before smpo.py: $(cat "${WORK_DIR}/configs/continuity_gate_failure.txt")" >&2
+HALO_FLEX_SLIDING="${FLEX_ENV}" "${SMOKE_VENV}/bin/python" "${HALO_DIR}/scripts/training/preference/smpo.py" "${OUTPUT_DIR}/configs/smoke_vlm_smpo.yaml" 2>&1 | tee "${OUTPUT_DIR}/configs/smpo_run.log"
+"${SMOKE_VENV}/bin/python" -c "from pathlib import Path; from eahtr.halo_smoke import verify_halo_run_log_finite_loss; print('SMPO losses:', verify_halo_run_log_finite_loss(Path('${OUTPUT_DIR}/configs/smpo_run.log'), min_steps=int('${MAX_STEPS}')))"
+if [[ -f "${OUTPUT_DIR}/configs/continuity_gate_failure.txt" ]]; then
+  echo "ERROR: Stage 2 continuity gate failed before smpo.py: $(cat "${OUTPUT_DIR}/configs/continuity_gate_failure.txt")" >&2
   exit 1
 fi

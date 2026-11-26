@@ -88,6 +88,9 @@ if PINNED_REPO_COMMIT:
     subprocess.run(['git', '-C', str(REPO_DIR), 'fetch', '--depth', '1', 'origin', PINNED_REPO_COMMIT], check=True)
     subprocess.run(['git', '-C', str(REPO_DIR), 'checkout', PINNED_REPO_COMMIT], check=True)
 subprocess.run(['pip', 'install', '-q', '--no-deps', '-e', str(REPO_DIR)], check=True)
+import sys
+if str(REPO_DIR / 'src') not in sys.path:
+    sys.path.insert(0, str(REPO_DIR / 'src'))
 REPO_GIT_SHA = subprocess.check_output(['git', '-C', str(REPO_DIR), 'rev-parse', '--short', 'HEAD'], text=True).strip()
 print(f'Repo commit: {REPO_GIT_SHA} | transformers={transformers.__version__}')
 
@@ -150,7 +153,7 @@ OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
 WORK_ROOT.mkdir(parents=True, exist_ok=True)
 
 # Set SMOKE_TEST_MODE = True for a ~15-25 min end-to-end validation run first;
-# switch to False for the full 3,145-page active public dataset run (2,897 train / 126 val / 122 test_public).
+# switch to False for the full 3,145-page active public dataset run (2,897 train / 124 val / 124 test_public).
 SMOKE_TEST_MODE = True
 
 # Select which Apache-2.0 competition candidates to run:

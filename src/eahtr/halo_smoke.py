@@ -223,6 +223,7 @@ def build_smoke_yaml_configs(
     smpo_dataset_dir: Path,
     vram_gb: float,
     repo_root: Path | None = None,
+    max_steps: int = 5,
 ) -> tuple[Path, Path]:
     """Emit temporary 1x GPU QLoRA SFT and SMPO smoke configs adapted for VRAM."""
     resolved_root = repo_root or base_sft_yaml.resolve().parents[2]
@@ -233,9 +234,8 @@ def build_smoke_yaml_configs(
 
     def _patch(cfg: dict[str, Any], ds_path: Path, output_subdir: str, *, is_smpo: bool) -> dict[str, Any]:
         updated = dict(cfg)
-        updated.pop("test_size", None)
-        for fsdp_key in ("fsdp_reshard_after_forward", "fsdp_reshard_after_backward", "fsdp_defer_grad_sync"):
-            updated.pop(fsdp_key, None)
+        for drop_key in ("test_size", "fsdp_reshard_after_forward", "fsdp_reshard_after_backward", "fsdp_defer_grad_sync"):
+            updated.pop(drop_key, None)
         if isinstance(updated.get("chat_template"), str) and not Path(updated["chat_template"]).is_absolute():
             updated["chat_template"] = str((resolved_root / updated["chat_template"]).resolve())
         updated.update(
@@ -251,7 +251,7 @@ def build_smoke_yaml_configs(
                 "optim": "adamw_8bit" if use_qlora else "adamw_torch",
                 "use_liger_kernel": False,
                 "log_decoded_samples": True,
-                "max_steps": 5,
+                "max_steps": max_steps,
                 "save_strategy": "no" if is_smpo else "steps",
                 "eval_strategy": "no",
                 "report_to": "none",
@@ -263,7 +263,7 @@ def build_smoke_yaml_configs(
             updated["max_length"] = 2048 if small_vram else 4096
             updated["max_prompt_length"] = 1350 if small_vram else 1600
         else:
-            updated["save_steps"] = 5
+            updated["save_steps"] = max_steps
             updated["max_length"] = 4096
         if use_qlora:
             updated["bnb_4bit_quant_storage"] = "bfloat16"

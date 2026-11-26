@@ -42,8 +42,8 @@ RevCity file stems are numeric portal page IDs rather than document boundaries. 
 | Split | Pages (% Active) | Groups | `apsrevcity` | `hsprevcity` | `lcprevcity` | `mss` | Notes |
 |---|---:|---:|---:|---:|---:|---:|---|
 | **`train`** | `2,897` (`92.1%`) | `17` | `1,424` | `1,303` | `124` | `46` | All `17` large volumes (`> 40` pages) |
-| **`val`** | `126` (`4.0%`) | `21` | `85` | `31` | `4` | `6` | Development tuning & checkpoint selection only |
-| **`test_public`** | `122` (`3.9%`) | `21` | `92` | `10` | `16` | `4` | Frozen until single post-freeze evaluation |
+| **`val`** | `124` (`3.9%`) | `21` | `83` | `31` | `4` | `6` | Development tuning & checkpoint selection only |
+| **`test_public`** | `124` (`3.9%`) | `21` | `94` | `10` | `16` | `4` | Frozen until single post-freeze evaluation |
 
 - **Disjointness audits:** All pairwise split audits (`train` vs. `val`, `train` vs. `test_public`, `val` vs. `test_public`) record **`0` collisions** across `document_id`, `writer_key`, `image_sha256`, `>= 8`-word normalized exact text, and `32`-word SHA-256 n-grams, plus advisory perceptual `dHash` review candidates (`Hamming <= 4`). `0` `val`/`test_public` pairs fall within `25` portal IDs.
 - **Out-of-fold Stage 2 split hygiene:** Stage 2 preference rollouts use page-balanced `document_id`/`writer_key` cross-validation folds (`_assign_balanced_folds`) via `ROLLOUT_SOURCE = 'oof_train'` so Stage 2 never builds `rejected` pairs from memorized in-sample pages or eval/test rows.
@@ -53,7 +53,7 @@ RevCity file stems are numeric portal page IDs rather than document boundaries. 
 ## 4. Known Limitations & Reporting Rules
 
 1. **Document-group disjoint only by default (`attributed_hands = 0`):** Unless `PORTAL_CREATOR_MAP_PATH` is provided, RevCity metadata lacks scribe/hand labels. Do **not** claim unseen-writer generalization on default RevCity splits; report them strictly as **document-group disjoint in-collection** evaluations, paired with `challenge_loc` for out-of-collection shift.
-2. **Eval split shape & small-group exhaustion:** All `42` small groups (`<= 40` pages, `248` pages total) are allocated across `val` (`126` pages, `4.0%`) and `test_public` (`122` pages, `3.9%`), falling slightly under the `5%` target because small groups are exhausted while `train` holds the `17` large volumes.
+2. **Eval split shape & small-group exhaustion:** All `42` small groups (`<= 40` pages, `248` pages total) are allocated across `val` (`124` pages, `3.9%`) and `test_public` (`124` pages, `3.9%`), falling slightly under the `5%` target because small groups are exhausted while `train` holds the `17` large volumes.
 3. **Non-APS per-institution slices are not standalone reportable:** Outside `apsrevcity`, per-institution sample counts are too small (`HSP test=10`, `LCP val=4`, `MSS val=6 / test=4`) to support standalone per-institution claims.
 4. **Deleted/damaged spans & reference slips:** Roughly `39%` of sampled RevCity pages contain `[...]` crossed-out deletions or damage (not added glosses), so zero-shot baselines report `--dual-convention` against both `raw_text` and cleaned `text`. An `8`-page (`1,687`-word) spot check of RevCity ground truth confirmed `8` transcription slips (`20` more probable), including `2` duplicated lines.
 5. **Sparse hard-case held-out panel:** `hard_case_held_out.jsonl` contains `8` sparse (`<= 7`-word) non-train/non-test diagnostic rows and should be treated strictly as a sanity panel, not an aggregate CER benchmark.

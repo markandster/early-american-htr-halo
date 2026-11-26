@@ -155,11 +155,14 @@ def test_filter_vlm_rows_post_expansion_and_vram_smoke_configs(tmp_path: Path) -
         smpo_dataset_dir=tmp_path / "smpo_ds",
         vram_gb=80.0,
         repo_root=repo_root,
+        max_steps=10,
     )
     smpo_80_cfg = yaml.safe_load(smpo_80.read_text(encoding="utf-8"))
+    sft_80_cfg = yaml.safe_load((tmp_path / "sm80" / "smoke_sft.yaml").read_text(encoding="utf-8"))
     assert smpo_80_cfg["max_length"] == 4096
     assert smpo_80_cfg["load_in_4bit"] is False
     assert smpo_80_cfg["optim"] == "adamw_torch"
+    assert sft_80_cfg["max_steps"] == 10 and sft_80_cfg["save_steps"] == 10 and smpo_80_cfg["max_steps"] == 10
 
 
 def test_verify_train_sample_image_tokens_and_smoke_notebook(tmp_path: Path) -> None:

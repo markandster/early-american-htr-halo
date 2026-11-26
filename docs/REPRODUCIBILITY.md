@@ -2,7 +2,7 @@
 
 This runbook documents the exact pinned revisions, hardware prerequisites, and command sequence to reproduce **`early-american-htr-halo`** from a clean Linux/macOS host.
 
-> **Verification Status:** CPU unit tests (`46 passed`), Tier-1 static YAML checks (`7/7`), and Tier-2 clean-room Halo parser validation (`7/7` against external `whitecircle/halo@53fe34a`) are verified passing. Live GPU runtime, peak VRAM, and Gemma 4 `12B` accuracy metrics remain pending GPU execution (see [results/README.md](../results/README.md)).
+> **Verification Status:** CPU unit tests (`46 passed`), Tier-1 static YAML checks (`7/7`), and Tier-2 clean-room Halo parser validation (`7/7` against external `whitecircle/halo@53fe34adcc4ef4bef9979ffaa1d50b5b5d4948b2`) are verified passing. On a live 24 GB Colab Pro+ NVIDIA L4 (`driver=580.82.07`, `22.49 GiB`), 4-bit QLoRA (`bnb_4bit_quant_storage=bfloat16`, `HALO_FLEX_SLIDING=0`, `peft_bf16_autocast`) passed `VLMDataCollator` batch-0 (`proc=1092`, `batch=1092`, `eot_id=106`), 5-step `sft.py` (`1.644 → 1.194`, `train_loss=1.462`, `175.7s`, trainable vision LoRA updates), `merge_peft_adapters.py` + `verify_mlx_export.py`, natural `<turn|>` stop, Stage 1→2 `SMPOTrainer` step-0 continuity (`base→SFT shift=3.31727`, `stage2→base=3.587596`; `0.0` diff under matching FP32-norm + `autocast`), and 5-step `smpo.py` (`2.242 → 2.503`, `train_loss=2.359`, `320.7s`). **An 80 GB BF16 (`>= 56 GiB`) smoke run is still required before Dec 1**, and full-corpus Gemma 4 `12B` validation accuracy remains unmeasured (see [results/README.md](../results/README.md)).
 
 ---
 
@@ -11,7 +11,7 @@ This runbook documents the exact pinned revisions, hardware prerequisites, and c
 | Component | Pinned Version / Revision | License | Notes |
 |---|---|---|---|
 | **Repository** | `early-american-htr-halo` (`main`) | Apache-2.0 | Never vendors external Halo code |
-| **External Trainer** | `whitecircle/halo` (`v1.3.0rc2`, commit `53fe34a`) | Halo License | Cloned externally to `--halo-repo` (`/tmp/halo` or `/workspace/halo`) |
+| **External Trainer** | `whitecircle/halo` (`53fe34adcc4ef4bef9979ffaa1d50b5b5d4948b2` / `53fe34a`) | Halo License | Cloned externally to `--halo-repo` (`/tmp/halo` or `/workspace/halo`); no `v1.3.0rc2` git tag exists (`hopper-1.3.0rc2` / `blackwell-1.3.0rc2` refer to ECR images) |
 | **Optimizer Dependency** | `Dao-AILab/gram-newton-schulz@244a451d684a39d68f593aef03b6fe7cfa6a31d1` | Open Source | Installed `--no-deps` by `run_halo_smoke.sh` |
 | **Primary Base Model** | `google/gemma-4-12B-it` (`rev 43c9d014b231`) | Apache-2.0 | Ungated; staged to `1,120` soft tokens before training |
 | **Conditional Pilot Model** | `thinkingmachines/Inkling-2-Small` (`rev 885d78bfca61`) | Apache-2.0 | Ungated; requires `EP=8` Dec 1 serving/memory pilot |
@@ -26,7 +26,7 @@ This runbook documents the exact pinned revisions, hardware prerequisites, and c
 - **CPU Validation Host (macOS or Linux):** Python `3.12`, no GPU required for `pytest` or Tier-1/Tier-2 config validation.
 - **1× GPU Smoke Host (`scripts/run_halo_smoke.sh`):**
   - NVIDIA driver **`>= 560.28`** (`select_pytorch_cuda_index` picks `cu126` for `>= 560.28`, `cu128` for `>= 570.26`, `cu130` for `>= 580.65`, and fails closed below `560.28`).
-  - VRAM adaptive thresholds: `< 32 GiB` (e.g., 24 GB L4) runs 4-bit QLoRA with `HALO_FLEX_SLIDING=0` (and `max_length: 2048` for SMPO smoke); `>= 56 GiB` (80 GB H100/A100) runs full BF16 at `max_length: 4096`.
+  - VRAM adaptive thresholds: `< 56 GiB` runs 4-bit QLoRA (`load_in_4bit: true`, `bnb_4bit_quant_storage: bfloat16` required so Gemma 4 `patch_ln1` does not fail with Float/BFloat16 mismatch during SFT; `< 32 GiB` such as a 24 GB L4 also sets `HALO_FLEX_SLIDING=0` and SMPO smoke `max_length: 2048` / `max_prompt_length: 1350`); `>= 56 GiB` (80 GB H100/A100) runs full BF16 at `max_length: 4096`.
   - Disk: `~120 GB` free for Gemma 4 weights, virtual environment, working cache, and merged checkpoint.
   - Persistent-volume overrides (recommended on RunPod/cloud pods whose container `/` is small):
     ```bash
@@ -52,9 +52,13 @@ pip install -e ".[dev]"
 pytest -v
 python scripts/validate_halo_configs.py
 
-# Clean-room Tier-2 parser validation against external Halo checkout (Python 3.12):
-git clone --depth 50 https://github.com/whitecircle/halo.git /tmp/halo
-git -C /tmp/halo checkout 53fe34a
+# Clean-room Tier-2 parser validation against external Halo checkout (Python 3.12; install Halo deps first):
+git clone --filter=blob:none --no-checkout https://github.com/whitecircle/halo.git /tmp/halo
+git -C /tmp/halo fetch --depth 1 origin 53fe34adcc4ef4bef9979ffaa1d50b5b5d4948b2
+git -C /tmp/halo checkout 53fe34adcc4ef4bef9979ffaa1d50b5b5d4948b2
+pip install "torch==2.11.0" "transformers==5.23.0" "trl==1.14.2" "peft==0.18.1" "accelerate>=1.11.0,<1.12.0" "datasets>=4.8.5,<5.0.0" "ruamel.yaml>=0.19.1,<0.20.0" "pydantic>=2.6.4,<3.0.0" "huggingface-hub>=1.0.0,<2.0.0"
+pip install --no-deps "gram-newton-schulz @ git+https://github.com/Dao-AILab/gram-newton-schulz.git@244a451d684a39d68f593aef03b6fe7cfa6a31d1"
+pip install --no-deps -e /tmp/halo
 python scripts/validate_halo_configs.py --halo-repo /tmp/halo
 ```
 
@@ -62,13 +66,15 @@ python scripts/validate_halo_configs.py --halo-repo /tmp/halo
 
 ```bash
 bash scripts/run_halo_smoke.sh 2>&1 | tee smoke.log
+# Optional overrides for faster/custom reruns (default MAX_STEPS=5, OUTPUT_DIR=$WORK_DIR):
+# REUSE_VENV=1 MAX_STEPS=10 OUTPUT_DIR=/tmp/smoke_rerun bash scripts/run_halo_smoke.sh 2>&1 | tee smoke_rerun.log
 ```
 
-This verifies NVIDIA driver `>= 560.28`, Halo clean-room installation, `1,120` realized image tokens on `VLMDataCollator` batch-0, live Halo PEFT vision-parameter updates, `5` distinct finite SFT losses, adapter merge + `verify_mlx_export.py`, natural `<turn|>` termination on a short page, fresh-process Stage 1→2 `SMPOTrainer` teacher-forced log-prob continuity, and `5` finite SMPO losses.
+This verifies NVIDIA driver `>= 560.28`, Halo clean-room installation, `1,120` realized image tokens on `VLMDataCollator` batch-0 (`1,092` on sampled page), live Halo PEFT vision-parameter updates, `MAX_STEPS` distinct finite SFT losses, adapter merge + `verify_mlx_export.py`, natural `<turn|>` termination on a short page, fresh-process Stage 1→2 `SMPOTrainer` teacher-forced log-prob continuity (`peft_bf16_autocast` with matching FP32-norm casting when `< 56 GiB`), and `MAX_STEPS` finite SMPO losses.
 
 ### Step C — Export Disjoint Public SFT Arrow Dataset
 
-Generate public manifests via Cell 4 of [notebooks/colab_competition_pretrain_sft.ipynb](../notebooks/colab_competition_pretrain_sft.ipynb) (see [docs/DATA_SHEET.md](DATA_SHEET.md)), stage the high-resolution `1,120`-token Gemma 4 directory, and export the Arrow `DatasetDict` (mapping `val` → Halo internal `test`):
+Generate public manifests via Cell 4 of [notebooks/colab_competition_pretrain_sft.ipynb](../notebooks/colab_competition_pretrain_sft.ipynb) (see [docs/DATA_SHEET.md](DATA_SHEET.md)), re-root Colab's `/content/...` `image_path` entries if moving manifests to another host, stage the high-resolution `1,120`-token Gemma 4 directory, and export the Arrow `DatasetDict` (mapping `val` → Halo internal `test`):
 
 ```bash
 python scripts/stage_gemma4_highres.py \
@@ -95,6 +101,13 @@ STAGE=sft MODEL_SIZE=12b DATASET_DIR=data/halo_vlm_sft HALO_DIR=/tmp/halo NUM_GP
 ### Step E — Validation Eval, Image-Swap Causal Check & Repetition-Penalty Baseline
 
 ```bash
+# 0. Zero-shot baseline on val (produces results/val_zeroshot.json; repeat post-freeze with --allow-frozen-test on manifests/test_public.jsonl for results/test_zeroshot.json)
+python scripts/merge_and_eval_halo.py \
+  --model-dir checkpoints/gemma4-12b-highres-1120 \
+  --eval-jsonl manifests/val.jsonl \
+  --out-json results/val_zeroshot.json \
+  --dual-convention
+
 # 1. Stage 1 validation score (dual-convention + newline/order metrics + clustered bootstrap CI)
 python scripts/merge_and_eval_halo.py \
   --model-dir checkpoints/gemma4-12b-eahtr-sft-merged \
@@ -121,15 +134,22 @@ python scripts/merge_and_eval_halo.py \
 
 ### Step F — Conditional Stage 2 VLM SMPO (Out-of-Fold Rollouts Only)
 
-Run Stage 2 only if Stage 1 validation failure rate justifies preference optimization (see [docs/TRAINING_PLAN.md](TRAINING_PLAN.md)):
+Run Stage 2 only if Stage 1 validation failure rate justifies preference optimization (see [docs/TRAINING_PLAN.md](TRAINING_PLAN.md)). Because `generate_halo_rollouts.py` verifies `split == "train"` on `--train-jsonl`, true **out-of-fold** rollouts require first training fold-held-out Stage 1 models (`OOF_NUM_FOLDS > 1`, e.g. excluding `manifests/oof_fold0_train.jsonl`) and passing each held-out Stage 1 checkpoint rather than sampling from a Stage 1 model trained on all of `train`. To monitor SMPO loss cleanly without leaking into training, build `data/pref_val.jsonl` only from `manifests/val.jsonl` with `--allow-eval-split` (never passed to `--train-jsonl`):
 
 ```bash
 python scripts/generate_halo_rollouts.py \
-  --model-dir checkpoints/gemma4-12b-eahtr-sft-merged \
+  --model-dir checkpoints/gemma4-12b-eahtr-sft-oof0-merged \
   --train-jsonl manifests/oof_fold0_train.jsonl \
   --out-pref-jsonl data/pref_train.jsonl \
   --out-rollouts-jsonl data/raw_rollouts.jsonl \
   --source-fold fold0
+
+python scripts/generate_halo_rollouts.py \
+  --model-dir checkpoints/gemma4-12b-eahtr-sft-merged \
+  --train-jsonl manifests/val.jsonl \
+  --allow-eval-split \
+  --out-pref-jsonl data/pref_val.jsonl \
+  --source-fold val
 
 python scripts/export_halo_datasets.py \
   --mode preference \
@@ -144,6 +164,11 @@ STAGE=smpo MODEL_SIZE=12b \
   DATASET_DIR=data/halo_vlm_smpo \
   HALO_DIR=/tmp/halo NUM_GPUS=1 \
   bash scripts/run_gemma4_halo.sh
+
+# Produce final merged directory from the winning Stage 1 or Stage 2 PEFT adapter:
+python /tmp/halo/scripts/after_training/merge_peft_adapters.py \
+  --adapter_dir checkpoints/gemma4-12b-eahtr-final-adapter \
+  --output_dir checkpoints/gemma4-12b-eahtr-final-merged
 ```
 
 ### Step G — Single Post-Freeze `test_public` Run & Optional Local `<= 24 GB` MLX Check
