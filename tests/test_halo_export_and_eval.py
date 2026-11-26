@@ -358,3 +358,42 @@ def test_merge_and_eval_cli_guards_and_rollout_manifest_refusal(tmp_path: Path, 
     valid_name_jsonl.write_text(json.dumps({"record_id": "v1", "document_id": "d1", "writer_key": "w1", "split": "train", "image_path": str(img_a), "text": "Dear Sir"}) + "\n", encoding="utf-8")
     monkeypatch.setattr(sys, "argv", ["generate_halo_rollouts.py", "--model-dir", str(mdl_dir), "--train-jsonl", str(valid_name_jsonl), "--out-pref-jsonl", str(tmp_path / "p_ok.jsonl")])
     assert r_mod.main() == 0
+
+
+def test_full_weight_gemma4_export_parity_fail_closed(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    from eahtr.halo_export import verify_exported_vlm_dir
+
+    staged = tmp_path / "staged_26b"
+    exported = tmp_path / "bf16_export"
+    staged.mkdir()
+    exported.mkdir()
+
+    proc_payload = {"image_seq_length": 1120, "image_processor": {"max_soft_tokens": 1120, "image_seq_length": 1120}}
+    g4_tpl = (repo_root / "configs" / "halo" / "templates" / "gemma4_htr_nothink.jinja").read_text(encoding="utf-8")
+    (staged / "processor_config.json").write_text(json.dumps(proc_payload), encoding="utf-8")
+    (staged / "chat_template.jinja").write_text(g4_tpl, encoding="utf-8")
+
+    # Missing processor_config.json or chat_template.jinja fails closed
+    with pytest.raises(FileNotFoundError, match="processor_config"):
+        verify_exported_vlm_dir(exported)
+
+    # Reverted default 280 soft tokens fails closed
+    (exported / "processor_config.json").write_text(
+        json.dumps({"image_seq_length": 280, "image_processor": {"max_soft_tokens": 280, "image_seq_length": 280}}),
+        encoding="utf-8",
+    )
+    (exported / "chat_template.jinja").write_text(g4_tpl, encoding="utf-8")
+    with pytest.raises(ValueError, match="1120"):
+        verify_exported_vlm_dir(exported)
+
+    # Restoring patched files passes
+    (exported / "processor_config.json").write_text(json.dumps(proc_payload), encoding="utf-8")
+    res = verify_exported_vlm_dir(exported)
+    assert res["image_seq_length"] == 1120
+    assert res["chat_template_verified"] is True
+
+    # Removing chat_template.jinja fails closed
+    (exported / "chat_template.jinja").unlink()
+    with pytest.raises(ValueError, match="missing chat_template"):
+        verify_exported_vlm_dir(exported)

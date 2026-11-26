@@ -95,10 +95,21 @@ python scripts/export_halo_datasets.py \
   --max-length 4096 --vision-tokens 1120
 ```
 
-### Step D — Stage 1 Gemma 4 `12B` Halo SFT & Parity Merge
+### Step D — Stage 1 Gemma 4 Halo SFT & Parity Export (`12b`, `26b_a4b`, `31b`)
+
+`scripts/run_gemma4_halo.sh` writes each run to a fresh `RUN_ID`-stamped directory (refusing stale non-empty outputs unless `RESUME=1`), validates the resolved YAML in an isolated folder, enforces `EP` / `NUM_GPUS` parity, and either merges PEFT adapters (`12b`, `31b`) or converts `fp32_experts` full checkpoints via Halo's `convert_to_bf16.py --verify` while preserving the `1,120`-token processor & template (`26b_a4b`, budget `~300 GB` disk):
 
 ```bash
+# Primary: 12B Dense LoRA (1 GPU)
 STAGE=sft MODEL_SIZE=12b DATASET_DIR=data/halo_vlm_sft HALO_DIR=/tmp/halo NUM_GPUS=1 \
+  bash scripts/run_gemma4_halo.sh
+
+# Fallback MoE: 26B-A4B Full SFT (EP=8, 8x 80 GB GPUs)
+STAGE=sft MODEL_SIZE=26b_a4b DATASET_DIR=data/halo_vlm_sft HALO_DIR=/tmp/halo NUM_GPUS=8 \
+  bash scripts/run_gemma4_halo.sh
+
+# Fallback Dense: 31B LoRA (H200/B200 or 2x GPU FSDP)
+STAGE=sft MODEL_SIZE=31b DATASET_DIR=data/halo_vlm_sft HALO_DIR=/tmp/halo NUM_GPUS=2 \
   bash scripts/run_gemma4_halo.sh
 ```
 
@@ -169,7 +180,16 @@ STAGE=smpo MODEL_SIZE=12b \
   HALO_DIR=/tmp/halo NUM_GPUS=1 \
   bash scripts/run_gemma4_halo.sh
 
-# Produce final merged directory from the winning Stage 1 or Stage 2 PEFT adapter:
+# Full-weight 26B-A4B or 31B SMPO example (EP=8 / EP=4 respectively on 8 GPUs):
+# STAGE=smpo MODEL_SIZE=26b_a4b EP_SIZE=8 \
+#   SFT_MERGED_DIR=checkpoints/gemma4-26b-a4b-sft-bf16 \
+#   DATASET_DIR=data/halo_vlm_smpo \
+#   HALO_DIR=/tmp/halo NUM_GPUS=8 \
+#   bash scripts/run_gemma4_halo.sh
+
+# For 12B PEFT runs, merge the Stage 1 or Stage 2 PEFT adapter into a full HuggingFace directory
+# (full-weight 26B-A4B and 31B runs convert checkpoint-N via Halo's convert_to_bf16.py --verify
+# inside run_gemma4_halo.sh into a fresh *_final_bf16 directory):
 python /tmp/halo/scripts/after_training/merge_peft_adapters.py \
   --adapter_dir checkpoints/gemma4-12b-eahtr-final-adapter \
   --output_dir checkpoints/gemma4-12b-eahtr-final-merged
