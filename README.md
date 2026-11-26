@@ -24,9 +24,11 @@ See [docs/BACKGROUND.md](docs/BACKGROUND.md) for the pre-competition empirical m
 
 ## Verifiable Archival Reward Function & VLM Preference Engine
 
-For a completion $y$ and diplomatic ground truth $y^*$:
+For a completion $y$ and diplomatic ground truth $y^{\ast}$:
 
-$$R(y, y^*) = 0.6 \max\left(0,\, 1 - \text{CER}_{\text{strict}}(y, y^*)\right) + 0.4 \max\left(0,\, 1 - \text{WER}_{\text{strict}}(y, y^*)\right) - 0.05\, P_{\text{mod}}(y, y^*) - 0.10\, P_{\text{fmt}}(y) - 0.25\, P_{\text{trunc}}(y, y^*)$$
+```math
+R(y, y^{\ast}) = 0.6 \max\left(0,\, 1 - \text{CER}_{\text{strict}}(y, y^{\ast})\right) + 0.4 \max\left(0,\, 1 - \text{WER}_{\text{strict}}(y, y^{\ast})\right) - 0.05\, P_{\text{mod}}(y, y^{\ast}) - 0.10\, P_{\text{fmt}}(y) - 0.25\, P_{\text{trunc}}(y, y^{\ast})
+```
 
 - **Hard Failure Floor (`-1.0`):** Applied unconditionally on `finish_reason == "length"`, consecutive repeated lines (`>= 4`), repeated standalone dash tokens (`>= 4`), repeated n-gram loops, or non-empty output on blank versos.
 - **Strict Diplomatic & Line-Break Scoring (`eahtr.metrics`):** Preserves case, punctuation, original spelling, and line breaks (`Unicode NFC`, collapsed whitespace) alongside lenient scoring, explicit `newline_cer`, `line_boundary_f1`, `order_tolerant_cer`, and clustered `paired_bootstrap_ci`.
