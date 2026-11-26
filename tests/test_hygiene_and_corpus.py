@@ -75,6 +75,16 @@ def test_parse_alto_xml_lines_extracts_ordered_text() -> None:
     portrait_alto = alto.replace('WIDTH="2000" HEIGHT="1500"', 'WIDTH="1000" HEIGHT="1500"').replace('WIDTH="2000"', 'WIDTH="1000"')
     assert detect_two_page_opening(portrait_alto) is False
 
+    tagged_opening = """<?xml version="1.0" encoding="UTF-8"?>
+    <alto xmlns="http://www.loc.gov/standards/alto/ns-v4#">
+      <Tags><OtherTag ID="T_A" LABEL="Main A"/><OtherTag ID="T_B" LABEL="Main B"/></Tags>
+      <Layout><Page ID="P1" WIDTH="1000" HEIGHT="1500"><PrintSpace HPOS="0" VPOS="0" WIDTH="1000" HEIGHT="1500">
+        <TextBlock ID="B1" TAGREFS="T_A" HPOS="50" VPOS="50" WIDTH="400" HEIGHT="300"><TextLine ID="L1"><String CONTENT="A"/></TextLine></TextBlock>
+        <TextBlock ID="B2" TAGREFS="T_B" HPOS="520" VPOS="50" WIDTH="400" HEIGHT="300"><TextLine ID="L2"><String CONTENT="B"/></TextLine></TextBlock>
+      </PrintSpace></Page></Layout>
+    </alto>"""
+    assert detect_two_page_opening(tagged_opening) is True
+
 
 def test_parse_page_xml_lines_extracts_ordered_text() -> None:
     page_xml = """<?xml version="1.0" encoding="UTF-8"?>

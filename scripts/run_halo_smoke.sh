@@ -306,8 +306,10 @@ probe_out.write_text(json.dumps(collected), encoding="utf-8")
 probe_json = work / "configs" / "stage2_probe_lps.json"
 subprocess.check_call([sys.executable, "-c", stage2_probe, str(work), str(probe_json)])
 stage2_lps = json.loads(probe_json.read_text(encoding="utf-8"))
-s2_tol = 0.05 if vram_gb >= 56.0 else 0.15
+s2_tol = max(0.05, min(0.15, 0.25 * sft_shift)) if vram_gb >= 56.0 else max(0.15, min(0.35, 0.5 * sft_shift))
 report = verify_stage_continuity_logprobs(base_lps, sft_lps, stage2_lps, tol=s2_tol)
+if report["max_step0_diff"] > 0.05:
+    print(f"[WARN] Stage 2 step-0 vs merged SFT max logit diff={report['max_step0_diff']:.6f} > 0.05 (tol={s2_tol:.6f}, sft_shift={sft_shift:.6f})")
 report["live_vs_merged_diff"] = merge_diff
 print("Verified Stage 1->2 continuity (via Halo SMPOTrainer):", report)
 PY

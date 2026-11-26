@@ -46,9 +46,9 @@ def main() -> int:
     if has_test_split and not args.allow_frozen_test:
         print("Refusing test manifest without --allow-frozen-test during dev. Use val.jsonl.", file=sys.stderr)
         return 2
-    eval_ids_list = [r.get("record_id") for r in rows]
-    if len(eval_ids_list) != len(set(eval_ids_list)):
-        print(f"Duplicate record_id entries found in {args.eval_jsonl}", file=sys.stderr)
+    eval_ids_list = [str(r.get("record_id") or "").strip() for r in rows]
+    if any(not rid for rid in eval_ids_list) or len(eval_ids_list) != len(set(eval_ids_list)):
+        print(f"Missing or duplicate record_id entries found in {args.eval_jsonl}", file=sys.stderr)
         return 2
 
     base_map: dict[str, float] | None = None
@@ -58,9 +58,9 @@ def main() -> int:
             return 2
         base_data = json.loads(args.baseline_predictions.read_text(encoding="utf-8"))
         base_rows = base_data if isinstance(base_data, list) else base_data.get("predictions", [])
-        base_ids_list = [r.get("record_id") for r in base_rows]
-        if len(base_ids_list) != len(set(base_ids_list)):
-            print(f"Duplicate record_id entries found in {args.baseline_predictions}", file=sys.stderr)
+        base_ids_list = [str(r.get("record_id") or "").strip() for r in base_rows]
+        if any(not rid for rid in base_ids_list) or len(base_ids_list) != len(set(base_ids_list)):
+            print(f"Missing or duplicate record_id entries found in {args.baseline_predictions}", file=sys.stderr)
             return 2
         if set(base_ids_list) != set(eval_ids_list):
             print(
@@ -68,7 +68,11 @@ def main() -> int:
                 file=sys.stderr,
             )
             return 2
-        base_map = {r["record_id"]: float(r["strict_cer"]) for r in base_rows}
+        try:
+            base_map = {str(r["record_id"]).strip(): float(r["strict_cer"]) for r in base_rows}
+        except (KeyError, TypeError, ValueError) as exc:
+            print(f"Invalid strict_cer entry in {args.baseline_predictions}: {exc}", file=sys.stderr)
+            return 2
 
     if args.adapter_dir is not None:
         merge_script = args.halo_repo / "scripts" / "after_training" / "merge_peft_adapters.py"
@@ -77,7 +81,7 @@ def main() -> int:
             check=True,
         )
 
-    verify_exported_vlm_dir(args.model_dir, model_family=args.model_family)
+    verify_exported_vlm_dir(args.model_dir, model_family=args.model_family, reference_dir=args.adapter_dir)
 
     import torch
     from PIL import Image

@@ -137,6 +137,34 @@ def _build_arm_cache_key(cand_key: str, arm: str, spec, train_rows: list[dict], 
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode('utf-8')).hexdigest()[:16]
 
 
+def _merge_saved_adapter(spec, processor, adapter_dir: Path, merged_dir: Path, use_4bit: bool, live_model=None) -> str | None:
+    merged_dir.parent.mkdir(parents=True, exist_ok=True)
+    if not use_4bit and live_model is not None:
+        merged_model = live_model.merge_and_unload()
+        merged_model.save_pretrained(merged_dir, safe_serialization=True)
+        processor.save_pretrained(merged_dir)
+        del merged_model
+        _assert_highres_processor_config(merged_dir, spec.hf_repo, reference_dir=adapter_dir)
+        return str(merged_dir)
+    try:
+        host_ram_gb = (os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES')) / (1024 ** 3)
+    except Exception:
+        host_ram_gb = None
+    if host_ram_gb is not None and spec.params_b * 3.0 > host_ram_gb:
+        print(f'[SKIP MERGE] Host RAM {host_ram_gb:.1f} GB < ~{spec.params_b * 3.0:.0f} GB needed; adapter saved at {adapter_dir}.')
+        return None
+    cpu_kw = {'device_map': 'cpu', 'torch_dtype': torch.bfloat16, 'trust_remote_code': spec.trust_remote_code}
+    if spec.hf_revision:
+        cpu_kw['revision'] = spec.hf_revision
+    cpu_base = load_vlm_model(spec.hf_repo, cpu_kw)
+    merged_model = PeftModel.from_pretrained(cpu_base, str(adapter_dir)).merge_and_unload()
+    merged_model.save_pretrained(merged_dir, safe_serialization=True)
+    processor.save_pretrained(merged_dir)
+    del merged_model, cpu_base
+    _assert_highres_processor_config(merged_dir, spec.hf_repo, reference_dir=adapter_dir)
+    return str(merged_dir)
+
+
 def run_candidate_arm(cand_key: str, arm: str, arm_train_rows: list[dict], val_slice: list[dict], test_slice: list[dict]) -> dict:
     spec = COMPETITION_CANDIDATES[cand_key]
     use_4bit = should_use_4bit(spec, VRAM_GB, arm)
@@ -145,18 +173,30 @@ def run_candidate_arm(cand_key: str, arm: str, arm_train_rows: list[dict], val_s
     out_dir = OUTPUT_ROOT / f'{cand_key}-{arm}'
     cache_key = _build_arm_cache_key(cand_key, arm, spec, arm_train_rows, eval_target, use_4bit)
     run_dir = out_dir / cache_key
+    merged_dir = WORK_ROOT / 'merged' / f'{cand_key}-{arm}-{cache_key}'
     out_dir.mkdir(parents=True, exist_ok=True); run_dir.mkdir(parents=True, exist_ok=True)
     score_file = out_dir / f'{eval_split_name}_eval_scores_{cache_key}.json'
     if score_file.is_file():
         cached = json.loads(score_file.read_text(encoding='utf-8'))
-        m_dir = cached.get('merged_hf_dir')
-        if m_dir and not Path(m_dir).is_dir():
-            print(f'[WARN] Cached merged_hf_dir missing on disk ({m_dir}); clearing stale reference.')
-            cached['merged_hf_dir'] = None
-        if cached.get('adapter_dir') and not Path(cached['adapter_dir']).is_dir():
-            print(f'[WARN] Cached adapter_dir missing on disk: {cached["adapter_dir"]}')
-        print(f'[SKIP] Cache hit {cand_key}-{arm} ({cache_key}): {score_file}')
-        return cached
+        if arm == 'baseline_zeroshot':
+            print(f'[SKIP] Cache hit {cand_key}-{arm} ({cache_key}): {score_file}')
+            return cached
+        a_dir = cached.get('adapter_dir')
+        if not a_dir or not Path(a_dir).is_dir():
+            print(f'[WARN] Cached adapter_dir missing on disk; invalidating stale cache and re-running.')
+        else:
+            m_dir = cached.get('merged_hf_dir')
+            if not m_dir or not Path(m_dir).is_dir():
+                print(f'[RECOVER] Rebuilding missing merged_hf_dir from {a_dir} -> {merged_dir}')
+                proc = load_processor_fullres({'hf_repo': spec.hf_repo, 'hf_revision': spec.hf_revision, 'max_pixels': spec.max_pixels, 'trust_remote_code': spec.trust_remote_code})
+                try:
+                    cached['merged_hf_dir'] = _merge_saved_adapter(spec, proc, Path(a_dir), merged_dir, use_4bit)
+                    score_file.write_text(json.dumps(cached, indent=2), encoding='utf-8')
+                except Exception as rec_exc:
+                    cached['merged_hf_dir'] = None
+                    print(f'[WARN] Cached merge recovery failed: {rec_exc}')
+            print(f'[SKIP] Cache hit {cand_key}-{arm} ({cache_key}): {score_file}')
+            return cached
 
     print(f'\\n================ {cand_key} ({spec.hf_repo}@{spec.hf_revision}) | ARM={arm} | EVAL={eval_split_name} ================')
     processor = load_processor_fullres({'hf_repo': spec.hf_repo, 'hf_revision': spec.hf_revision, 'max_pixels': spec.max_pixels, 'trust_remote_code': spec.trust_remote_code})
@@ -378,36 +418,13 @@ def run_candidate_arm(cand_key: str, arm: str, arm_train_rows: list[dict], val_s
     }
     score_file.write_text(json.dumps(payload, indent=2), encoding='utf-8')
 
-    merged_dir = WORK_ROOT / 'merged' / f'{cand_key}-{arm}-{cache_key}'
-    merged_dir.parent.mkdir(parents=True, exist_ok=True)
     try:
-        if not use_4bit:
-            merged_model = model.merge_and_unload()
-            merged_model.save_pretrained(merged_dir, safe_serialization=True)
-            processor.save_pretrained(merged_dir)
-            del merged_model
-            _assert_highres_processor_config(merged_dir, spec.hf_repo, reference_dir=run_dir / 'adapter_best')
-            payload['merged_hf_dir'] = str(merged_dir)
-        else:
+        if use_4bit:
             del model, optimizer, scheduler; gc.collect(); torch.cuda.empty_cache()
-            try:
-                host_ram_gb = (os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES')) / (1024 ** 3)
-            except Exception:
-                host_ram_gb = None
-            if host_ram_gb is not None and spec.params_b * 3.0 > host_ram_gb:
-                print(f'[SKIP MERGE] Host RAM {host_ram_gb:.1f} GB < ~{spec.params_b * 3.0:.0f} GB needed; adapter saved at {run_dir / "adapter_best"}.')
-            else:
-                cpu_kw = {'device_map': 'cpu', 'torch_dtype': torch.bfloat16, 'trust_remote_code': spec.trust_remote_code}
-                if spec.hf_revision:
-                    cpu_kw['revision'] = spec.hf_revision
-                cpu_base = load_vlm_model(spec.hf_repo, cpu_kw)
-                merged_model = PeftModel.from_pretrained(cpu_base, str(run_dir / 'adapter_best')).merge_and_unload()
-                merged_model.save_pretrained(merged_dir, safe_serialization=True)
-                processor.save_pretrained(merged_dir)
-                del merged_model, cpu_base
-                _assert_highres_processor_config(merged_dir, spec.hf_repo, reference_dir=run_dir / 'adapter_best')
-                payload['merged_hf_dir'] = str(merged_dir)
             model = optimizer = scheduler = None
+        payload['merged_hf_dir'] = _merge_saved_adapter(
+            spec, processor, run_dir / 'adapter_best', merged_dir, use_4bit, live_model=(None if use_4bit else model)
+        )
         score_file.write_text(json.dumps(payload, indent=2), encoding='utf-8')
     except Exception as merge_exc:
         print(f'[WARN] Post-eval merge failed (scores & adapter already saved): {merge_exc}')

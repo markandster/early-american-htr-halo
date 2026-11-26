@@ -152,7 +152,7 @@ def export_halo_vlm_preference_dataset(
         rows: list[dict[str, Any]] = []
         for idx, row in enumerate(pairs):
             split_val = str(row.get("split") or "").strip().lower()
-            if forbid_eval_splits and split_val in {"val", "validation", "test", "test_public"}:
+            if forbid_eval_splits and split_val and split_val != "train":
                 raise ValueError(
                     f"Refusing eval/test split row ({split_val!r}) inside Stage-2 preference train_pairs"
                 )
@@ -334,7 +334,9 @@ def verify_exported_vlm_dir(
                 exp_p = exp_proc.apply_chat_template(sample, tokenize=False, add_generation_prompt=True)
                 ref_enc = ref_proc(text=[ref_p], images=[probe_img], return_tensors="pt")
                 exp_enc = exp_proc(text=[exp_p], images=[probe_img], return_tensors="pt")
-                if list(ref_enc["input_ids"][0]) != list(exp_enc["input_ids"][0]):
+                ref_ids = ref_enc["input_ids"][0].tolist() if hasattr(ref_enc["input_ids"][0], "tolist") else list(ref_enc["input_ids"][0])
+                exp_ids = exp_enc["input_ids"][0].tolist() if hasattr(exp_enc["input_ids"][0], "tolist") else list(exp_enc["input_ids"][0])
+                if ref_ids != exp_ids:
                     raise ValueError(f"{model_dir}: multimodal AutoProcessor input_ids diverged from {reference_dir}")
                 if "pixel_values" in ref_enc and "pixel_values" in exp_enc:
                     def _flat(v: Any) -> list[float]:

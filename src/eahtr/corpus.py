@@ -112,8 +112,24 @@ def detect_two_page_opening(
     width: int | float | None = None,
     height: int | float | None = None,
 ) -> bool:
-    """Detect whether an ALTO page scan spans a landscape two-page opening."""
+    """Detect whether an ALTO page scan spans a two-page opening via Main A/B tags or aspect ratio."""
     root = ET.fromstring(xml_text)
+    tag_map: dict[str, str] = {}
+    for elem in root.iter():
+        if _local_tag(elem.tag) == "OtherTag":
+            tid = str(elem.attrib.get("ID") or "").strip()
+            lbl = str(elem.attrib.get("LABEL") or "").strip().lower()
+            if tid and lbl:
+                tag_map[tid] = lbl
+    active_labels: set[str] = set()
+    for blk in root.iter():
+        if _local_tag(blk.tag) == "TextBlock":
+            for tid in str(blk.attrib.get("TAGREFS") or "").split():
+                active_labels.add(tag_map.get(tid, tid.lower()))
+    if any(lbl in {"main a", "page a"} for lbl in active_labels) and any(
+        lbl in {"main b", "page b"} for lbl in active_labels
+    ):
+        return True
     pw, ph = width, height
     for pg in root.iter():
         if _local_tag(pg.tag) == "Page":

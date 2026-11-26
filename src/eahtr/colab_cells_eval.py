@@ -163,9 +163,15 @@ def _stratified_eval_slice(rows: list[dict], max_pages: int | None, seed: int) -
             picked.append(by_group[gid].pop(0))
             if not by_group[gid]:
                 by_inst[inst].pop(0)
+            else:
+                by_inst[inst].append(by_inst[inst].pop(0))
             if len(picked) >= max_pages:
                 break
     return picked
+
+
+def _fold_key(row: dict) -> str:
+    return str(row['writer_key']) if row.get('writer_attributed') else str(row.get('document_id', ''))
 
 
 def _select_doc_disjoint_pilot(rows: list[dict], max_pages: int | None, seed: int) -> list[dict]:
@@ -173,7 +179,7 @@ def _select_doc_disjoint_pilot(rows: list[dict], max_pages: int | None, seed: in
         return list(rows)
     by_group = {}
     for r in rows:
-        by_group.setdefault(r.get('document_id', ''), []).append(r)
+        by_group.setdefault(_fold_key(r), []).append(r)
     gkeys = sorted(by_group, key=lambda gid: hashlib.sha256(f'{seed}:{gid}'.encode()).hexdigest())
     picked = []
     for gid in gkeys:
@@ -189,7 +195,7 @@ val_slice = _stratified_eval_slice(val_rows, VAL_EVAL_MAX_PAGES, SEED)
 if OOF_NUM_FOLDS > 1:
     active_train_rows = [
         r for r in train_rows
-        if (int(hashlib.sha256(str(r.get('document_id', '')).encode()).hexdigest()[:8], 16) % OOF_NUM_FOLDS) != OOF_FOLD_IDX
+        if (int(hashlib.sha256(_fold_key(r).encode()).hexdigest()[:8], 16) % OOF_NUM_FOLDS) != OOF_FOLD_IDX
     ]
 else:
     active_train_rows = train_rows
@@ -273,7 +279,8 @@ if GENERATE_OFFLINE_GRPO_ROLLOUTS:
     ROLLOUT_TEMPS = (0.3, 0.7, 0.7, 1.0)
     trained_rows = pilot_train_rows if ('pilot_train_rows' in globals() and SMOKE_TEST_MODE) else active_train_rows
     trained_docs = {r['document_id'] for r in trained_rows}
-    oof_rows = [r for r in train_rows if r['document_id'] not in trained_docs]
+    trained_keys = {_fold_key(r) for r in trained_rows}
+    oof_rows = [r for r in train_rows if r['document_id'] not in trained_docs and _fold_key(r) not in trained_keys]
     fold_tag = f'fold_{OOF_FOLD_IDX}_of_{OOF_NUM_FOLDS}' if OOF_NUM_FOLDS > 1 else ('smoke_doc_oof' if oof_rows else 'in_sample_train')
     if oof_rows and ROLLOUT_SOURCE == 'oof_train':
         rollout_rows = oof_rows[:GRPO_ROLLOUT_PROMPTS]

@@ -69,6 +69,10 @@ def test_halo_export_helpers_and_dir_verifier(tmp_path: Path, monkeypatch: pytes
         export_halo_vlm_preference_dataset(
             [{**pair_train[0], "split": "test_public"}], pair_test, tmp_path / "bad_split_pref", lambda s: len(s.split())
         )
+    with pytest.raises(ValueError, match="eval/test split row"):
+        export_halo_vlm_preference_dataset(
+            [{**pair_train[0], "split": "challenge_loc"}], pair_test, tmp_path / "bad_loc_pref", lambda s: len(s.split())
+        )
 
     pairs = build_preference_pairs(
         [
@@ -231,6 +235,11 @@ def test_merge_and_eval_cli_guards_and_rollout_manifest_refusal(tmp_path: Path, 
     bad_base = tmp_path / "bad_base.json"
     bad_base.write_text(json.dumps([{"record_id": "r1", "strict_cer": 0.5}]), encoding="utf-8")
     monkeypatch.setattr(sys, "argv", ["merge_and_eval_halo.py", "--model-dir", str(mdl_dir), "--eval-jsonl", str(eval_jsonl), "--out-json", str(out_json), "--baseline-predictions", str(bad_base)])
+    assert mod.main() == 2
+
+    empty_id_base = tmp_path / "empty_id_base.json"
+    empty_id_base.write_text(json.dumps([{"record_id": "", "strict_cer": 0.5}, {"record_id": "r2", "strict_cer": 0.5}]), encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", ["merge_and_eval_halo.py", "--model-dir", str(mdl_dir), "--eval-jsonl", str(eval_jsonl), "--out-json", str(out_json), "--baseline-predictions", str(empty_id_base)])
     assert mod.main() == 2
 
     class _FakeTensor:

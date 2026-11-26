@@ -151,8 +151,8 @@ if INCLUDE_REVCITY:
         paired_stems = sorted(s for s, d in by_stem.items() if 'img' in d and 'xml' in d)
         print(f'Scanning all {len(paired_stems)} paired (JPG/PNG + ALTO-XML) pages in Zenodo 15776323 (CC-BY-4.0)')
 
-        # Assign volume/item groups (max_id_gap=5) & merge exact/n-gram linked keys before splitting
-        item_groups = assign_revcity_item_groups(paired_stems, max_id_gap=5, creator_map=creator_map or None)
+        # Assign volume/item groups (max_id_gap=30) & merge exact/n-gram linked keys before splitting
+        item_groups = assign_revcity_item_groups(paired_stems, max_id_gap=30, creator_map=creator_map or None)
         admitted_items = []
         for stem in paired_stems:
             entry = by_stem[stem]
