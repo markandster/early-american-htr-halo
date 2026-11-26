@@ -111,7 +111,7 @@ def export_halo_vlm_preference_dataset(
     max_prompt_length: int = 1600,
     vision_tokens: int = 1120,
 ) -> dict[str, Any]:
-    """Filter preference pairs post-expansion and export Halo VLM SMPO/DPO Arrow DatasetDict."""
+    """Filter preference pairs post-expansion and export Halo VLM SMPO Arrow DatasetDict."""
     from datasets import Dataset, DatasetDict, Features, Image as HFImage, Sequence as HFSeq, Value
 
     def _filter_pairs(pairs: Sequence[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:

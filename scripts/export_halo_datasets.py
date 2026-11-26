@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Export full-scale Halo SFT or VLM SMPO/DPO Arrow DatasetDicts with post-expansion filtering."""
+"""Export full-scale Halo SFT or VLM SMPO Arrow DatasetDicts with post-expansion filtering."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ def _load_jsonl(path: Path) -> list[dict]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Export Halo SFT or VLM SMPO/DPO Arrow DatasetDict.")
+    parser = argparse.ArgumentParser(description="Export Halo SFT or VLM SMPO Arrow DatasetDict.")
     parser.add_argument("--mode", choices=("sft", "preference"), required=True)
     parser.add_argument("--train-jsonl", type=Path, required=True)
     parser.add_argument("--val-jsonl", "--test-jsonl", dest="val_jsonl", type=Path, required=True, help="Dev validation JSONL (mapped to Halo internal test split)")

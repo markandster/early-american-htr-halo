@@ -22,6 +22,7 @@ class _GenerationTagExtension(Extension):
 
 from eahtr.colab_pipeline import (
     COMPETITION_CANDIDATES,
+    CompetitionCandidateSpec,
     assign_deterministic_split,
     assign_revcity_item_groups,
     make_sham_derangement,
@@ -34,16 +35,9 @@ from eahtr.colab_pipeline import (
 
 
 def test_all_competition_candidates_pass_policy() -> None:
-    assert set(COMPETITION_CANDIDATES) == {
-        "gemma4_12b",
-        "gemma4_26b_a4b",
-        "inkling2_mini",
-    }
+    assert set(COMPETITION_CANDIDATES) == {"gemma4_12b"}
     assert "vision_tower" in COMPETITION_CANDIDATES["gemma4_12b"].vision_trainable_patterns
     assert COMPETITION_CANDIDATES["gemma4_12b"].lora_target_modules == ("all-linear",)
-    assert COMPETITION_CANDIDATES["gemma4_26b_a4b"].lora_target_modules == ("all-linear",)
-    assert COMPETITION_CANDIDATES["inkling2_mini"].quant_method == "modelopt"
-    assert "r_proj" in COMPETITION_CANDIDATES["inkling2_mini"].lora_target_modules
     for spec in COMPETITION_CANDIDATES.values():
         validate_competition_candidate(spec)
 
@@ -73,14 +67,14 @@ def test_resolve_vision_modules_across_model_families() -> None:
         gemma12b_modules, COMPETITION_CANDIDATES["gemma4_12b"].vision_trainable_patterns
     ) == ["model.embed_vision"]
 
-    gemma26b_modules = [
+    vision_tower_modules = [
         "model.vision_tower",
         "model.vision_tower.encoder",
         "model.multi_modal_projector",
         "model.multi_modal_projector.linear",
     ]
     assert resolve_vision_modules_to_save(
-        gemma26b_modules, COMPETITION_CANDIDATES["gemma4_26b_a4b"].vision_trainable_patterns
+        vision_tower_modules, COMPETITION_CANDIDATES["gemma4_12b"].vision_trainable_patterns
     ) == ["model.multi_modal_projector", "model.vision_tower"]
 
     with pytest.raises(RuntimeError, match="Refusing frozen-vision run"):
@@ -110,23 +104,33 @@ def test_assign_deterministic_split_groups_consistently() -> None:
 
 def test_should_use_4bit_across_gpus_and_arms() -> None:
     g12 = COMPETITION_CANDIDATES["gemma4_12b"]
-    g26 = COMPETITION_CANDIDATES["gemma4_26b_a4b"]
-    ink = COMPETITION_CANDIDATES["inkling2_mini"]
+    high_vram_spec = CompetitionCandidateSpec(
+        key="synthetic_large",
+        hf_repo="example/synthetic-large",
+        license="Apache-2.0",
+        params_b=24.0,
+        active_params_b=8.0,
+        lora_target_modules=("all-linear",),
+        vision_trainable_patterns=("vision_tower",),
+        max_pixels=2048 * 2048,
+        mlx_quant_bits=4,
+        est_mlx_peak_gb=16.0,
+        min_bf16_vram_gb=72.0,
+    )
 
-    # L4 24 GB requires 4-bit for both zero-shot and training across all candidates
-    for spec in (g12, g26, ink):
+    # L4 24 GB requires 4-bit for both zero-shot and training
+    for spec in (g12, high_vram_spec):
         assert should_use_4bit(spec, 24.0, "baseline_zeroshot") is True
         assert should_use_4bit(spec, 24.0, "real") is True
 
-    # A100 40 GB runs 12B zero-shot in BF16, but 26B zero-shot and all training in 4-bit
+    # A100 40 GB runs 12B zero-shot in BF16, but 12B training and higher-VRAM specs in 4-bit
     assert should_use_4bit(g12, 40.0, "baseline_zeroshot") is False
     assert should_use_4bit(g12, 40.0, "real") is True
-    for spec in (g26, ink):
-        assert should_use_4bit(spec, 40.0, "baseline_zeroshot") is True
-        assert should_use_4bit(spec, 40.0, "real") is True
+    assert should_use_4bit(high_vram_spec, 40.0, "baseline_zeroshot") is True
+    assert should_use_4bit(high_vram_spec, 40.0, "real") is True
 
-    # H100 / A100 80 GB runs 12B, 26B, and Inkling in BF16 cleanly
-    for spec in (g12, g26, ink):
+    # H100 / A100 80 GB runs both in BF16 cleanly
+    for spec in (g12, high_vram_spec):
         assert should_use_4bit(spec, 80.0, "baseline_zeroshot") is False
         assert should_use_4bit(spec, 80.0, "real") is False
 
@@ -197,11 +201,7 @@ def test_halo_yaml_configs_match_schema_and_ink2_rules() -> None:
     config_dir = repo_root / "configs" / "halo"
     expected_files = {
         "gemma4_12b_sft.yaml",
-        "gemma4_26b_a4b_sft.yaml",
         "gemma4_12b_vlm_smpo.yaml",
-        "gemma4_26b_a4b_vlm_smpo.yaml",
-        "gemma4_12b_vlm_dpo.yaml",
-        "inkling2_mini_sft.yaml",
         "inkling2_small_sft.yaml",
         "inkling2_small_vlm_smpo.yaml",
         "archival_grpo_offline.yaml",
@@ -228,23 +228,11 @@ def test_halo_yaml_configs_match_schema_and_ink2_rules() -> None:
             assert tpl_path.is_file(), f"{p.name} references missing template {tpl_path}"
         loaded[p.name] = cfg
 
-    for name in ("gemma4_12b_sft.yaml", "gemma4_12b_vlm_smpo.yaml", "gemma4_12b_vlm_dpo.yaml"):
+    for name in ("gemma4_12b_sft.yaml", "gemma4_12b_vlm_smpo.yaml"):
         assert loaded[name]["attn_implementation"] == "sdpa"
         assert loaded[name]["lora_target_modules"] == "all-linear"
         assert loaded[name]["force_chat_template"] is True
-    for name in ("gemma4_26b_a4b_sft.yaml", "gemma4_26b_a4b_vlm_smpo.yaml"):
-        assert loaded[name]["attn_implementation"] == "sdpa"
-        assert loaded[name]["expert_parallel_size"] == 8
-        assert loaded[name]["lora_r"] % 8 == 0
-        assert set(loaded[name]["lora_target_modules"]) >= {
-            "q_proj",
-            "k_proj",
-            "v_proj",
-            "o_proj",
-            "gate_up_proj",
-            "down_proj",
-        }
-    for name in ("gemma4_12b_vlm_smpo.yaml", "gemma4_26b_a4b_vlm_smpo.yaml", "inkling2_small_vlm_smpo.yaml"):
+    for name in ("gemma4_12b_vlm_smpo.yaml", "inkling2_small_vlm_smpo.yaml"):
         cfg = loaded[name]
         assert cfg["loss_type"] == "smooth_lower_bound"
         assert cfg["use_margin_schedule"] is True
@@ -254,22 +242,13 @@ def test_halo_yaml_configs_match_schema_and_ink2_rules() -> None:
         assert cfg["lora_dropout"] == 0.0
         assert float(cfg["learning_rate"]) <= 5.0e-6
 
-    dpo_cfg = loaded["gemma4_12b_vlm_dpo.yaml"]
-    assert dpo_cfg["images_field"] == "images"
-    assert dpo_cfg["loss_type"] == ["sigmoid", "sft"]
-    assert "precompute_ref_log_probs" not in dpo_cfg
-    assert "generation_max_prompt_length" not in dpo_cfg
-    assert "max_prompt_length" not in dpo_cfg
-
     for name in (
-        "inkling2_mini_sft.yaml",
         "inkling2_small_sft.yaml",
         "inkling2_small_vlm_smpo.yaml",
         "inkling2_offline_grpo.yaml",
     ):
         assert loaded[name]["pad_token"] == "<|endoftext|>"
 
-    assert "r_proj" in loaded["inkling2_mini_sft.yaml"]["lora_target_modules"]
     for name in ("inkling2_small_sft.yaml", "inkling2_small_vlm_smpo.yaml", "inkling2_offline_grpo.yaml"):
         assert loaded[name]["frozen_quantized_experts"] is True
         assert loaded[name]["expert_parallel_size"] >= 2

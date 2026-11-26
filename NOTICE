@@ -8,8 +8,6 @@ External Dataset, Model & Framework Provenance (not bundled in this repository):
 - Revolutionary City HTR Corpus (Zenodo record 15776323): CC-BY-4.0
 - Library of Congress "By the People" (LCCN 2020446971): Public Domain
 - google/gemma-4-12B-it (HF commit 43c9d014b231): Apache-2.0
-- google/gemma-4-26B-A4B-it (HF commit 4d7ae4984b7d): Apache-2.0
 - thinkingmachines/Inkling-2-Small (HF commit 885d78bfca61): Apache-2.0
-- thinkingmachines/Inkling-2-Mini (HF commit c9d028302cd0): Apache-2.0
 - Training framework target: White Circle Halo (https://github.com/whitecircle/halo,
   release v1.3.0rc2, commit 53fe34a), kept strictly external under the Halo License.

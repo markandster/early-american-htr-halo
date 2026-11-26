@@ -7,7 +7,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HALO_DIR="${HALO_DIR:-/tmp/halo}"
 STAGE="${STAGE:-sft}"                     # sft | smpo
-MODEL_SIZE="${MODEL_SIZE:-12b}"           # 12b | 26b
+MODEL_SIZE="${MODEL_SIZE:-12b}"           # 12b
 WORK_DIR="${WORK_DIR:-${REPO_ROOT}/checkpoints/halo_runs}"
 DATASET_DIR="${DATASET_DIR:?Set DATASET_DIR to exported Halo Arrow DatasetDict}"
 ADAPTER_DIR="${ADAPTER_DIR:-${WORK_DIR}/gemma4-${MODEL_SIZE}-eahtr-${STAGE}}"
@@ -19,13 +19,8 @@ if [[ "${MODEL_SIZE}" == "12b" ]]; then
   HF_REV="43c9d014b231"
   BASE_YAML="${REPO_ROOT}/configs/halo/gemma4_12b_${STAGE/smpo/vlm_smpo}.yaml"
   DEFAULT_SFT_MERGED="${REPO_ROOT}/checkpoints/gemma4-12b-eahtr-sft-merged"
-elif [[ "${MODEL_SIZE}" == "26b" ]]; then
-  HF_REPO="google/gemma-4-26B-A4B-it"
-  HF_REV="4d7ae4984b7d"
-  BASE_YAML="${REPO_ROOT}/configs/halo/gemma4_26b_a4b_${STAGE/smpo/vlm_smpo}.yaml"
-  DEFAULT_SFT_MERGED="${REPO_ROOT}/checkpoints/gemma4-26b-a4b-eahtr-sft-merged"
 else
-  echo "ERROR: MODEL_SIZE must be '12b' or '26b' (got ${MODEL_SIZE})" >&2
+  echo "ERROR: MODEL_SIZE must be '12b' (got ${MODEL_SIZE})" >&2
   exit 1
 fi
 

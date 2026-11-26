@@ -17,7 +17,4 @@ Every reported evaluation records:
 | `google/gemma-4-12B-it` | Stage 1 VLM SFT (Halo Primary) | `revcity-val` / frozen `test_public` | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ (8-bit <= 12.5 GiB) | Non-thinking parity template, trainable vision |
 | `google/gemma-4-12B-it` | Stage 2 VLM SMPO (Conditional) | `revcity-val` / frozen `test_public` | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | Merged Stage 1 start + `chosen_sft_ratio: 1.0`; promoted only if `val` improves |
 | `google/gemma-4-12B-it` | LOC Genre-Shift Challenge | `challenge_loc` | _pending_ | _pending_ | — | _pending_ | _pending_ | — | Out-of-distribution Public Domain panel |
-| `google/gemma-4-26B-A4B-it` | Deferred reference | `revcity-val` | _deferred_ | _deferred_ | — | _deferred_ | _deferred_ | Excluded (>24 GB MLX) | Deferred behind 12B smoke & budget |
-| `google/gemma-4-12B-it` | Stage 2 VLM DPO (Deferred Ablation) | `revcity-val` | _deferred_ | _deferred_ | — | _deferred_ | _deferred_ | — | Deferred ablation |
 | `thinkingmachines/Inkling-2-Small` | Conditional Image Pilot | `revcity-val` | _conditional_ | _conditional_ | _conditional_ | _conditional_ | _conditional_ | Excluded (>24 GB MLX) | Frozen-vision SFT → SMPO (`chosen_sft_ratio: 1.0`) pending Dec 1 EP=8 memory & serving check |
-| `thinkingmachines/Inkling-2-Mini` | Blocked reference | — | _blocked_ | — | — | — | — | Excluded | Gated on upstream `inkling2_loop` loader support |

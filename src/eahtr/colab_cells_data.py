@@ -16,8 +16,7 @@ This notebook mirrors our high-resolution, trainable-vision, sham-controlled tra
    - **Optional Library of Congress *By the People*** (`LCCN 2020446971`, **Public Domain**) behind `INCLUDE_LOC_BY_THE_PEOPLE = False` as a genre-shift challenge panel (`hard_case_panel.jsonl` also captures blanks/leader-dots/duplicates).
 2. **Candidate Apache-2.0 Models:**
    - `gemma4_12b` (`google/gemma-4-12B-it`, **primary submission candidate**, ungated) — encoder-free dense VLM (`Stage 1 SFT` → conditional `Stage 2 VLM SMPO` with `chosen_sft_ratio: 1.0`).
-   - `gemma4_26b_a4b` (`google/gemma-4-26B-A4B-it`, deferred unless validated cleanly) — 26B/4B-active MoE VLM.
-   - `inkling2_mini` (`thinkingmachines/Inkling-2-Mini`, blocked on NVFP4 loader) — Halo cluster track tests conditional `thinkingmachines/Inkling-2-Small` after Dec 1.
+   - Halo cluster track also tests conditional `thinkingmachines/Inkling-2-Small` (`EP=8`, frozen-vision image-conditioned pilot) after Dec 1.
 3. **Dev Discipline, Evaluation & Stage 2 Rollouts:**
    - Development runs score **validation (`val`) ONLY** (with hash-keyed caches, same-checkpoint image-swap checks, strict/lenient + newline/line-boundary + order-tolerant CER, dual-convention zero-shot scoring, and verifiable `eahtr.rewards`). `test_public` remains frozen until final checkpoint freeze.
    - Optional Cell 7 generates and scores $K=4$ multi-temperature rollouts from the merged SFT model for Halo Stage 2 **VLM SMPO** (`chosen_sft_ratio: 1.0`).
@@ -117,7 +116,7 @@ if hf_token:
 else:
     print(
         'NOTE: HF_TOKEN not set. All active Apache-2.0 base checkpoints '
-        '(google/gemma-4-12B-it, google/gemma-4-26B-A4B-it, thinkingmachines/Inkling-2-Small) are ungated; '
+        '(google/gemma-4-12B-it, thinkingmachines/Inkling-2-Small) are ungated; '
         'HF_TOKEN is only required when PUBLISH_TO_HF_DATASET=True.'
     )
 """
@@ -138,7 +137,7 @@ WORK_ROOT.mkdir(parents=True, exist_ok=True)
 SMOKE_TEST_MODE = True
 
 # Select which Apache-2.0 competition candidates to run:
-# Available keys: ['gemma4_12b', 'gemma4_26b_a4b', 'inkling2_mini']
+# Available keys: ['gemma4_12b']
 CANDIDATE_KEYS = ['gemma4_12b']
 ARMS = ['baseline_zeroshot', 'real', 'sham_short']
 SHAM_MAX_PRESENTATIONS = 128 if SMOKE_TEST_MODE else 504

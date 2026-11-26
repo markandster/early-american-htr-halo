@@ -33,7 +33,7 @@ def test_tier1_validator_passes_repo_configs() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     res = validate_yaml_configs_tier1(repo_root / "configs" / "halo", repo_root=repo_root)
     assert res["tier"] == 1
-    assert res["count"] == 11
+    assert res["count"] == 7
 
 
 def test_tier1_validator_rejects_yaml11_boolean_and_ep_all_linear(tmp_path: Path) -> None:

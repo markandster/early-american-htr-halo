@@ -1,4 +1,4 @@
-# Halo Text-Only Contingency: Online GRPO — Gemma-4 12B / 26B-A4B text-only RLVR template.
+# Halo Text-Only Contingency: Online GRPO — Gemma-4 12B text-only RLVR template.
 # Note: Halo Online GRPO refuses image columns; use configs/halo/gemma4_*_vlm_smpo.yaml for Stage 2 VLM training.
 # Rewards use Halo's built-in RLVR source schema as a text-only post-correction contingency placeholder;
 # pre-scored diplomatic archival rewards from eahtr.rewards feed archival_grpo_offline.yaml or *_vlm_smpo.yaml.

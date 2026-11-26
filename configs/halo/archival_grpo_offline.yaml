@@ -1,16 +1,13 @@
-# Halo Text-Only Contingency: Offline GRPO — Gemma-4 26B-A4B / 12B post-correction on pre-scored rollouts.
+# Halo Text-Only Contingency: Offline GRPO — Gemma-4 12B post-correction on pre-scored rollouts.
 # Note: Halo Offline GRPO refuses image columns; use configs/halo/gemma4_*_vlm_smpo.yaml for Stage 2 VLM training.
 # Input rows: {"prompt": ..., "completions": [...], "rewards": [...]} emitted by eahtr.rewards.score_jsonl_file.
-# Launch: torchrun --nproc_per_node=8 /path/to/halo/scripts/training/grpo/offline.py configs/halo/archival_grpo_offline.yaml
+# Launch: torchrun --nproc_per_node=4 /path/to/halo/scripts/training/grpo/offline.py configs/halo/archival_grpo_offline.yaml
 
 # --- Model ---
-model_name_or_path: checkpoints/gemma4-26b-a4b-eahtr-sft
+model_name_or_path: checkpoints/gemma4-12b-eahtr-sft
 attn_implementation: sdpa
 moe_balancing: none
 bf16: true
-
-# --- Parallelism ---
-expert_parallel_size: 8
 
 # --- Dataset ---
 dataset:

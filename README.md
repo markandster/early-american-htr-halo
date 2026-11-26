@@ -16,7 +16,7 @@ Off-the-shelf document OCR models trained on modern printed text perform poorly 
 3. **Editorial Bracket Leakage:** Unstripped `[...]` editorial insertions and placeholder tokens bleed from archival XML conventions into clean manuscript transcriptions.
 4. **Premature Truncation & Blank-Page Hallucinations:** Stopping mid-letter or emitting archive boilerplate on blank versos.
 
-This project post-trains models strictly for writer-general diplomatic transcription preserving period spelling, capitalization, punctuation, abbreviations, and exact physical line breaks (`\n`), pairing **full-resolution trainable-vision SFT** (`scripts/training/sft.py`) with **conditional verifiable Stage 2 VLM SMPO** (`scripts/training/preference/smpo.py` with `chosen_sft_ratio: 1.0`, promoted only if `val` CER improves cleanly over Stage 1) scored deterministically by `eahtr.rewards` / `eahtr.preferences.build_preference_pairs`. *(VLM DPO and `26B-A4B` are deferred behind the primary `12B` track; text-only Halo GRPO configs are kept as contingency recipes.)*
+This project post-trains models strictly for writer-general diplomatic transcription preserving period spelling, capitalization, punctuation, abbreviations, and exact physical line breaks (`\n`), pairing **full-resolution trainable-vision SFT** (`scripts/training/sft.py`) with **conditional verifiable Stage 2 VLM SMPO** (`scripts/training/preference/smpo.py` with `chosen_sft_ratio: 1.0`, promoted only if `val` CER improves cleanly over Stage 1) scored deterministically by `eahtr.rewards` / `eahtr.preferences.build_preference_pairs`. *(Text-only Halo GRPO configs are kept as contingency recipes.)*
 
 ---
 
@@ -50,9 +50,7 @@ All splits are gated by `eahtr.hygiene.audit_split_disjointness` across `documen
 | Priority | Model | Role & Architecture | Optional Local Quantized Target (`<= 24 GB` MLX) | HF Access / License |
 |---|---|---|---|---|
 | **Primary (1)** | `google/gemma-4-12B-it` | 12B dense unified VLM (`gemma4_unified`, `1120` soft tokens; Stage 1 SFT → conditional Stage 2 SMPO) | 8-bit MLX (`<= 12.5 GiB`) | Ungated / Apache-2.0 (`rev 43c9d014b231`) |
-| **Deferred (1B)** | `google/gemma-4-26B-A4B-it` | 26B / 4B-active MoE VLM (`gemma4`, `EP=8`, deferred behind `12B` validation) | Excluded from 24 GB MLX gate | Ungated / Apache-2.0 (`rev 4d7ae4984b7d`) |
 | **Conditional Pilot (2)** | `thinkingmachines/Inkling-2-Small` | 48L × 384E NVFP4/MXFP8 MoE VLM (frozen-vision image-conditioned pilot post-Dec 1, `EP=8`) | Excluded from 24 GB MLX gate | Ungated / Apache-2.0 (`rev 885d78bfca61`) |
-| **Blocked (—)** | `thinkingmachines/Inkling-2-Mini` | Looped MoE VLM (`inkling2_loop`, **blocked** on upstream loader support) | — | Ungated / Apache-2.0 (`rev c9d028302cd0`) |
 
 See [docs/TRAINING_PLAN.md](docs/TRAINING_PLAN.md) for the full competition training plan, chat-template parity rules (`gemma4_htr_nothink.jinja`, `inkling2_htr_nothink.jinja`), Stage 1 SFT → Stage 2 VLM SMPO pipeline (`chosen_sft_ratio: 1.0`), and MLX gate.
 
@@ -62,7 +60,7 @@ See [docs/TRAINING_PLAN.md](docs/TRAINING_PLAN.md) for the full competition trai
 
 ```text
 ├── .github/workflows/ci.yml      # Automated pytest, Halo YAML Tier-1, & notebook AST CI
-├── configs/halo/                 # Halo SFT, VLM SMPO/DPO, contingency GRPO YAMLs & Jinja templates
+├── configs/halo/                 # Halo SFT, VLM SMPO, contingency GRPO YAMLs & Jinja templates
 ├── docs/TRAINING_PLAN.md         # Full competition training plan & verification ledger
 ├── notebooks/
 │   ├── colab_competition_pretrain_sft.ipynb  # Public-corpus Colab SFT, val eval, & Stage-2 rollouts
@@ -73,7 +71,7 @@ See [docs/TRAINING_PLAN.md](docs/TRAINING_PLAN.md) for the full competition trai
 │   ├── stage_gemma4_highres.py   # Zero-copy 1120 soft-token Gemma 4 staging helper
 │   ├── export_halo_datasets.py   # Post-expansion VLM Arrow DatasetDict exporter
 │   ├── run_halo_smoke.sh         # Clean-room Python 3.12 1x GPU SFT + merge + continuity + SMPO smoke
-│   ├── run_gemma4_halo.sh        # Canonical Gemma 4 12B/26B Halo launcher & post-train merge/verify
+│   ├── run_gemma4_halo.sh        # Canonical Gemma 4 12B Halo launcher & post-train merge/verify
 │   ├── merge_and_eval_halo.py    # Halo adapter merge & frozen single-run val/test evaluator
 │   ├── generate_halo_rollouts.py # Merged Stage 1 K=4 rollout sampler & GPU-hour estimator
 │   └── verify_mlx_export.py      # Hardened Jinja2/token-parity & 1120-token MLX export verifier
@@ -129,7 +127,7 @@ python -m eahtr.rewards --input rollouts.jsonl --output scored_rollouts.jsonl
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/markandster/early-american-htr-halo/blob/main/notebooks/colab_competition_pretrain_sft.ipynb)
 
-All active base checkpoints (`google/gemma-4-12B-it`, `google/gemma-4-26B-A4B-it`, and `thinkingmachines/Inkling-2-Small`) are **ungated**; `HF_TOKEN` in Colab Secrets is only required when `PUBLISH_TO_HF_DATASET = True`. Both [colab_competition_pretrain_sft.ipynb](notebooks/colab_competition_pretrain_sft.ipynb) and [colab_halo_smoke.ipynb](notebooks/colab_halo_smoke.ipynb) enforce competition-cleared data, `val`-only dev evaluation, and full-resolution vision processing.
+All active base checkpoints (`google/gemma-4-12B-it` and `thinkingmachines/Inkling-2-Small`) are **ungated**; `HF_TOKEN` in Colab Secrets is only required when `PUBLISH_TO_HF_DATASET = True`. Both [colab_competition_pretrain_sft.ipynb](notebooks/colab_competition_pretrain_sft.ipynb) and [colab_halo_smoke.ipynb](notebooks/colab_halo_smoke.ipynb) enforce competition-cleared data, `val`-only dev evaluation, and full-resolution vision processing.
 
 ---
 
