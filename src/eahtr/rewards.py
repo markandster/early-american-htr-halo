@@ -9,6 +9,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .candidates import DIPLOMATIC_PROMPT
 from .metrics import normalize_strict, score_pair
 
 _BRACKET_SPAN_RE = re.compile(r"\[[^\]]+\]")
@@ -41,11 +42,7 @@ _DEFAULT_SPELLING_REGEXES: tuple[tuple[re.Pattern[str], re.Pattern[str]], ...] =
     for archaic, modern in DEFAULT_HISTORICAL_SPELLING_PAIRS
 )
 
-DEFAULT_PREFERENCE_PROMPT = (
-    "Transcribe every word on this manuscript page using only the visible ink. "
-    "Preserve the writer's original spelling, capitalization, punctuation, "
-    "abbreviations, and line breaks. Do not modernize spelling or add commentary."
-)
+DEFAULT_PREFERENCE_PROMPT = DIPLOMATIC_PROMPT
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,73 +78,83 @@ class ArchivalRewardResult:
     reasons: list[str] = field(default_factory=list)
 
 
+def _repetition_streaks(text: str) -> tuple[int, int, int, int, str]:
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    max_line = 1 if lines else 0
+    best_line = lines[0] if lines else ""
+    max_dash_line = 1 if (lines and lines[0] in {"-", "--", "—"}) else 0
+    if lines:
+        streak = 1
+        d_streak = max_dash_line
+        for idx in range(1, len(lines)):
+            if lines[idx] == lines[idx - 1]:
+                streak += 1
+                if streak > max_line:
+                    max_line = streak
+                    best_line = lines[idx]
+            else:
+                streak = 1
+            if lines[idx] in {"-", "--", "—"}:
+                d_streak += 1
+                max_dash_line = max(max_dash_line, d_streak)
+            else:
+                d_streak = 0
+
+    tokens = (text or "").split()
+    max_dash_tok = 0
+    d_tok_streak = 0
+    for tok in tokens:
+        if tok in {"-", "--", "—"}:
+            d_tok_streak += 1
+            max_dash_tok = max(max_dash_tok, d_tok_streak)
+        else:
+            d_tok_streak = 0
+
+    max_ngram = 1 if tokens else 0
+    for ngram_len in (4, 3, 2):
+        if len(tokens) < ngram_len * 2:
+            continue
+        for start in range(len(tokens) - ngram_len * 2 + 1):
+            unit = tokens[start : start + ngram_len]
+            reps = 1
+            pos = start + ngram_len
+            while pos + ngram_len <= len(tokens) and tokens[pos : pos + ngram_len] == unit:
+                reps += 1
+                pos += ngram_len
+            max_ngram = max(max_ngram, reps)
+    return max_line, max_dash_line, max_dash_tok, max_ngram, best_line
+
+
 def detect_repetition_loop(
     text: str,
     max_repeat_lines: int = 4,
     max_repeat_dashes: int = 4,
     max_repeat_4grams: int = 5,
+    *,
+    reference: str = "",
 ) -> tuple[bool, list[str]]:
-    """Detect consecutive line repeats, standalone dash loops, and repeated 4-gram cycles."""
+    """Detect loops exceeding thresholds and any genuine repetitions present in reference."""
+    p_line, p_dline, p_dtok, p_ngram, best_line = _repetition_streaks(text)
+    if reference:
+        r_line, r_dline, r_dtok, r_ngram, _ = _repetition_streaks(reference)
+    else:
+        r_line = r_dline = r_dtok = r_ngram = 0
+
     reasons: list[str] = []
-    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
-
-    # 1. Consecutive identical non-empty lines or standalone dash/punctuation runs
-    if lines:
-        streak = 1
-        dash_streak = 1 if lines[0] in {"-", "--", "—"} else 0
-        if dash_streak >= max_repeat_dashes:
-            reasons.append("consecutive_dash_loop")
-        for idx in range(1, len(lines)):
-            cur = lines[idx]
-            prev = lines[idx - 1]
-            if cur == prev:
-                streak += 1
-                if streak >= max_repeat_lines and "consecutive_line_loop" not in reasons:
-                    reasons.append(f"consecutive_line_loop:{cur[:24]}")
-            else:
-                streak = 1
-
-            if cur in {"-", "--", "—"}:
-                dash_streak += 1
-                if dash_streak >= max_repeat_dashes and "consecutive_dash_loop" not in reasons:
-                    reasons.append("consecutive_dash_loop")
-            else:
-                dash_streak = 0
-
-    # 2. Consecutive standalone dash tokens in whitespace stream
-    tokens = (text or "").split()
-    dash_tok_streak = 0
-    for tok in tokens:
-        if tok in {"-", "--", "—"}:
-            dash_tok_streak += 1
-            if dash_tok_streak >= max_repeat_dashes and "consecutive_dash_token_loop" not in reasons:
-                reasons.append("consecutive_dash_token_loop")
-        else:
-            dash_tok_streak = 0
-
-    # 3. Adjacent repeated phrase cycles (2-gram to 4-gram, e.g., "and the and the ...") at any offset
-    for ngram_len in (4, 3, 2):
-        min_span = ngram_len * max_repeat_4grams
-        if len(tokens) < min_span:
-            continue
-        found_cycle = False
-        for start in range(0, len(tokens) - min_span + 1):
-            unit = tokens[start : start + ngram_len]
-            repeats = 1
-            pos = start + ngram_len
-            while pos + ngram_len <= len(tokens) and tokens[pos : pos + ngram_len] == unit:
-                repeats += 1
-                if repeats >= max_repeat_4grams:
-                    reasons.append("consecutive_ngram_loop")
-                    found_cycle = True
-                    break
-                pos += ngram_len
-            if found_cycle:
-                break
-        if found_cycle:
-            break
-
+    if p_line >= max_repeat_lines and p_line > r_line:
+        reasons.append(f"consecutive_line_loop:{best_line[:24]}")
+    if p_dline >= max_repeat_dashes and p_dline > r_dline:
+        reasons.append("consecutive_dash_loop")
+    if p_dtok >= max_repeat_dashes and p_dtok > r_dtok:
+        reasons.append("consecutive_dash_token_loop")
+    if p_ngram >= max_repeat_4grams and p_ngram > r_ngram:
+        reasons.append("consecutive_ngram_loop")
     return bool(reasons), reasons
+
+
+def recommended_max_new_tokens(ref_tokens: int, *, min_tokens: int = 2048, multiplier: float = 1.5) -> int:
+    """Scale decoding token budget above longest reference pages so faithful long transcriptions never cap out."""
+    return max(int(min_tokens), math.ceil(float(ref_tokens) * float(multiplier)))
 
 
 def count_editorial_leaks(prediction: str, reference: str) -> int:
@@ -224,6 +231,7 @@ def score_transcription(
         max_repeat_lines=cfg.max_consecutive_repeat_lines,
         max_repeat_dashes=cfg.max_consecutive_dash_tokens,
         max_repeat_4grams=cfg.max_consecutive_ngram_repeats,
+        reference=reference,
     )
     reasons.extend(loop_reasons)
 
@@ -355,62 +363,6 @@ def score_group_completions(
     return scored_rows
 
 
-def build_preference_pairs(
-    records_with_rollouts: list[dict[str, object]],
-    min_reward_margin: float = 0.05,
-    *,
-    prompt_text: str = DEFAULT_PREFERENCE_PROMPT,
-    config: ArchivalRewardConfig | None = None,
-    variant_pairs: list[tuple[str, str]] | tuple[tuple[str, str], ...] | None = None,
-) -> list[dict[str, object]]:
-    """Build Halo VLM SMPO/DPO preference pairs from scored multi-rollout records."""
-    if min_reward_margin < 0.0:
-        raise ValueError("min_reward_margin must be non-negative")
-
-    pairs: list[dict[str, object]] = []
-    for rec in records_with_rollouts:
-        image_path = str(rec.get("image_path") or "").strip()
-        if not image_path:
-            raise ValueError(f"Record {rec.get('record_id', '<unknown>')!r} is missing required image_path")
-
-        completions_raw = rec.get("completions")
-        completions = [str(c) for c in (completions_raw if isinstance(completions_raw, list) else [])]
-        finish_reasons_raw = rec.get("finish_reasons")
-        finish_reasons = (
-            [str(fr) for fr in finish_reasons_raw] if isinstance(finish_reasons_raw, list) else None
-        )
-        scored = score_group_completions(
-            completions,
-            str(rec.get("text") or rec.get("reference") or ""),
-            finish_reasons,
-            config=config,
-            variant_pairs=variant_pairs,
-        )
-        if len(scored) < 2:
-            continue
-
-        best = max(scored, key=lambda item: float(item["reward"]))
-        worst = min(scored, key=lambda item: float(item["reward"]))
-        margin = float(best["reward"]) - float(worst["reward"])
-        if margin < min_reward_margin:
-            continue
-
-        row_prompt = str(rec.get("prompt") or prompt_text)
-        pairs.append(
-            {
-                "record_id": str(rec.get("record_id", "")),
-                "images": [image_path],
-                "prompt": [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": row_prompt}]}],
-                "chosen": [{"role": "assistant", "content": str(best["completion"])}],
-                "rejected": [{"role": "assistant", "content": str(worst["completion"])}],
-                "chosen_reward": float(best["reward"]),
-                "rejected_reward": float(worst["reward"]),
-                "margin": round(margin, 6),
-            }
-        )
-    return pairs
-
-
 def score_jsonl_file(input_path: Path, output_path: Path) -> int:
     """Score rollout groups from an input JSONL file and write scored JSONL for Offline GRPO."""
     rows_written = 0
@@ -445,3 +397,11 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+def __getattr__(name: str) -> object:
+    if name == "build_preference_pairs":
+        from .preferences import build_preference_pairs
+
+        return build_preference_pairs
+    raise AttributeError(name)

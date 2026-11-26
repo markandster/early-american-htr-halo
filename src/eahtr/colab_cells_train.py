@@ -109,16 +109,30 @@ def build_training_batch(processor, image: Image.Image, target_text: str, device
 """
 
 CELL_5_ARM_SOURCE = """
+def _build_arm_cache_key(cand_key: str, arm: str, spec, train_rows: list[dict], eval_rows: list[dict]) -> str:
+    payload = {
+        'cand': cand_key, 'hf_repo': spec.hf_repo, 'arm': arm, 'smoke': SMOKE_TEST_MODE,
+        'ep': EPOCHS, 'r': LORA_RANK, 'lr': LEARNING_RATE, 'vlr': VISION_LR, 'seq': MAX_SEQ_LEN,
+        'max_new': MAX_EVAL_NEW_TOKENS, 'seed': SEED, 'freeze_eval': FINAL_FREEZE_EVAL_TEST_PUBLIC,
+        'train_ids': [r['record_id'] for r in train_rows[:64]] + [len(train_rows)],
+        'eval_ids': [r['record_id'] for r in eval_rows],
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode('utf-8')).hexdigest()[:16]
+
+
 def run_candidate_arm(cand_key: str, arm: str, arm_train_rows: list[dict], val_slice: list[dict], test_slice: list[dict]) -> dict:
     spec = COMPETITION_CANDIDATES[cand_key]
+    eval_target = test_slice if (FINAL_FREEZE_EVAL_TEST_PUBLIC and test_slice) else val_slice
+    eval_split_name = 'public_test' if (FINAL_FREEZE_EVAL_TEST_PUBLIC and test_slice) else 'val'
     out_dir = OUTPUT_ROOT / f'{cand_key}-{arm}'
     out_dir.mkdir(parents=True, exist_ok=True)
-    score_file = out_dir / 'public_eval_scores.json'
+    cache_key = _build_arm_cache_key(cand_key, arm, spec, arm_train_rows, eval_target)
+    score_file = out_dir / f'{eval_split_name}_eval_scores_{cache_key}.json'
     if score_file.is_file():
-        print(f'[SKIP] Already completed {cand_key}-{arm}: {score_file}')
+        print(f'[SKIP] Cache hit {cand_key}-{arm} ({cache_key}): {score_file}')
         return json.loads(score_file.read_text(encoding='utf-8'))
 
-    print(f'\\n================ {cand_key} ({spec.hf_repo}) | ARM={arm} ================')
+    print(f'\\n================ {cand_key} ({spec.hf_repo}) | ARM={arm} | EVAL={eval_split_name} ================')
     spec_dict = {
         'hf_repo': spec.hf_repo,
         'max_pixels': spec.max_pixels,
@@ -154,19 +168,22 @@ def run_candidate_arm(cand_key: str, arm: str, arm_train_rows: list[dict], val_s
     model = load_vlm_model(spec.hf_repo, load_kwargs)
 
     if arm == 'baseline_zeroshot':
-        eval_res = run_eval_panel(model, processor, test_slice, panel_name=f'{cand_key}-zeroshot-public-test')
+        eval_res = run_eval_panel(model, processor, eval_target, panel_name=f'{cand_key}-zeroshot-{eval_split_name}')
         payload = {
             'candidate': cand_key,
             'hf_repo': spec.hf_repo,
             'arm': arm,
+            'eval_split': eval_split_name,
+            'cache_key': cache_key,
             'used_4bit': use_4bit,
+            'per_side_cer': [p['strict_cer'] for p in eval_res['predictions']],
             'scores': eval_res['scores'],
         }
-        (out_dir / 'predictions_public_test.json').write_text(
+        (out_dir / f'predictions_{eval_split_name}_{cache_key}.json').write_text(
             json.dumps(eval_res['predictions'], ensure_ascii=False, indent=2), encoding='utf-8'
         )
         score_file.write_text(json.dumps(payload, indent=2), encoding='utf-8')
-        print(f'[ZERO-SHOT {cand_key}]', payload['scores'])
+        print(f'[ZERO-SHOT {cand_key} | {eval_split_name}]', payload['scores'])
         del model; gc.collect(); torch.cuda.empty_cache()
         return payload
 
@@ -330,13 +347,21 @@ def run_candidate_arm(cand_key: str, arm: str, arm_train_rows: list[dict], val_s
                     p.copy_(best_trainable_state[n].to(device=p.device, dtype=p.dtype))
         print(f'Restored best-val checkpoint from epoch {best_epoch} (val strict CER={best_val_cer}%)')
 
-    test_eval = run_eval_panel(model, processor, test_slice, panel_name=f'{cand_key}-{arm}-public-test')
-    pred_bytes = json.dumps(test_eval['predictions'], ensure_ascii=False, indent=2).encode('utf-8')
-    (out_dir / 'predictions_public_test.json').write_bytes(pred_bytes)
-    worst3 = sorted(test_eval['predictions'], key=lambda item: (item['reward'], -item['strict_cer']))[:3]
-    (out_dir / 'worst3_failures_public_test.json').write_text(
-        json.dumps(worst3, ensure_ascii=False, indent=2), encoding='utf-8'
-    )
+    final_eval = run_eval_panel(model, processor, eval_target, panel_name=f'{cand_key}-{arm}-{eval_split_name}')
+    pred_bytes = json.dumps(final_eval['predictions'], ensure_ascii=False, indent=2).encode('utf-8')
+    (out_dir / f'predictions_{eval_split_name}_{cache_key}.json').write_bytes(pred_bytes)
+    swap_delta = None
+    if arm == 'real' and len(eval_target) >= 4:
+        swap_subset = eval_target[:min(16, len(eval_target))]
+        swap_eval = run_eval_panel(model, processor, swap_subset, panel_name=f'{cand_key}-real-swap-check', swap_images=True)
+        matched_preds = final_eval['predictions'][:len(swap_subset)]
+        matched_sub = score_predictions_verifiable(
+            [p['reference'] for p in matched_preds],
+            [p['prediction'] for p in matched_preds],
+            [p['finish_reason'] for p in matched_preds],
+        )['strict_cer_pct']
+        swap_delta = round(swap_eval['scores']['strict_cer_pct'] - matched_sub, 2)
+        print(f'Image-swap check ({len(swap_subset)} pages): swap CER={swap_eval["scores"]["strict_cer_pct"]}% (delta={swap_delta:+.2f} pp)')
 
     merged_dir = out_dir / 'merged_hf'
     merged_dir_str = None
@@ -377,6 +402,8 @@ def run_candidate_arm(cand_key: str, arm: str, arm_train_rows: list[dict], val_s
         'candidate': cand_key,
         'hf_repo': spec.hf_repo,
         'arm': arm,
+        'eval_split': eval_split_name,
+        'cache_key': cache_key,
         'train_sides': len(arm_train_rows),
         'vision_trainable_params': n_vision_trainable,
         'lora_trainable_params': n_lora_trainable,
@@ -386,12 +413,14 @@ def run_candidate_arm(cand_key: str, arm: str, arm_train_rows: list[dict], val_s
         'best_epoch': best_epoch,
         'train_log': train_log,
         'predictions_sha256': hashlib.sha256(pred_bytes).hexdigest(),
-        'scores': test_eval['scores'],
+        'per_side_cer': [p['strict_cer'] for p in final_eval['predictions']],
+        'swap_cer_degradation': swap_delta,
+        'scores': final_eval['scores'],
         'adapter_dir': str(out_dir / 'adapter_best'),
         'merged_hf_dir': merged_dir_str,
     }
     score_file.write_text(json.dumps(payload, indent=2), encoding='utf-8')
-    print(f'[DONE {cand_key}-{arm}] public test:', payload['scores'])
+    print(f'[DONE {cand_key}-{arm} | {eval_split_name}]', payload['scores'])
 
     del model, optimizer, scheduler
     gc.collect()

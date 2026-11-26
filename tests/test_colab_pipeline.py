@@ -23,7 +23,9 @@ class _GenerationTagExtension(Extension):
 from eahtr.colab_pipeline import (
     COMPETITION_CANDIDATES,
     assign_deterministic_split,
+    assign_revcity_item_groups,
     make_sham_derangement,
+    parse_revcity_stem_id,
     resolve_vision_modules_to_save,
     should_use_4bit,
     validate_competition_candidate,
@@ -36,7 +38,6 @@ def test_all_competition_candidates_pass_policy() -> None:
         "gemma4_12b",
         "gemma4_26b_a4b",
         "inkling2_mini",
-        "qwen36_35b_a3b",
     }
     assert "vision_tower" in COMPETITION_CANDIDATES["gemma4_12b"].vision_trainable_patterns
     assert COMPETITION_CANDIDATES["gemma4_12b"].lora_target_modules == ("all-linear",)
@@ -45,6 +46,17 @@ def test_all_competition_candidates_pass_policy() -> None:
     assert "r_proj" in COMPETITION_CANDIDATES["inkling2_mini"].lora_target_modules
     for spec in COMPETITION_CANDIDATES.values():
         validate_competition_candidate(spec)
+
+    assert parse_revcity_stem_id("apsrevcity%3A1008") == ("apsrevcity", 1008, "apsrevcity_1008")
+    assert parse_revcity_stem_id("lcprevcity_159_OBJ") == ("lcprevcity", 159, "lcprevcity_159_OBJ")
+    groups = assign_revcity_item_groups(
+        ["apsrevcity%3A1008", "apsrevcity%3A1009", "apsrevcity%3A1015", "lcprevcity_159_OBJ"],
+        creator_map={"lcprevcity_159_OBJ": "hand_xyz"},
+    )
+    assert groups["apsrevcity%3A1008"]["document_id"] == groups["apsrevcity%3A1009"]["document_id"]
+    assert groups["apsrevcity%3A1015"]["document_id"] != groups["apsrevcity%3A1008"]["document_id"]
+    assert groups["lcprevcity_159_OBJ"]["writer_key"] == "scribed_hand:hand_xyz"
+    assert groups["lcprevcity_159_OBJ"]["hand_attributed"] == "true"
 
 
 def test_resolve_vision_modules_across_model_families() -> None:
@@ -69,15 +81,6 @@ def test_resolve_vision_modules_across_model_families() -> None:
     assert resolve_vision_modules_to_save(
         gemma26b_modules, COMPETITION_CANDIDATES["gemma4_26b_a4b"].vision_trainable_patterns
     ) == ["model.multi_modal_projector", "model.vision_tower"]
-
-    qwen_modules = [
-        "model.visual.merger",
-        "model.visual.merger.linear_fc1",
-        "model.visual.deepstack_merger_list",
-    ]
-    assert resolve_vision_modules_to_save(
-        qwen_modules, COMPETITION_CANDIDATES["qwen36_35b_a3b"].vision_trainable_patterns
-    ) == ["model.visual.deepstack_merger_list", "model.visual.merger"]
 
     with pytest.raises(RuntimeError, match="Refusing frozen-vision run"):
         resolve_vision_modules_to_save(
@@ -108,22 +111,21 @@ def test_should_use_4bit_across_gpus_and_arms() -> None:
     g12 = COMPETITION_CANDIDATES["gemma4_12b"]
     g26 = COMPETITION_CANDIDATES["gemma4_26b_a4b"]
     ink = COMPETITION_CANDIDATES["inkling2_mini"]
-    q35 = COMPETITION_CANDIDATES["qwen36_35b_a3b"]
 
     # L4 24 GB requires 4-bit for both zero-shot and training across all candidates
-    for spec in (g12, g26, ink, q35):
+    for spec in (g12, g26, ink):
         assert should_use_4bit(spec, 24.0, "baseline_zeroshot") is True
         assert should_use_4bit(spec, 24.0, "real") is True
 
-    # A100 40 GB runs 12B zero-shot in BF16, but 26B/35B zero-shot and all training in 4-bit
+    # A100 40 GB runs 12B zero-shot in BF16, but 26B zero-shot and all training in 4-bit
     assert should_use_4bit(g12, 40.0, "baseline_zeroshot") is False
     assert should_use_4bit(g12, 40.0, "real") is True
-    for spec in (g26, ink, q35):
+    for spec in (g26, ink):
         assert should_use_4bit(spec, 40.0, "baseline_zeroshot") is True
         assert should_use_4bit(spec, 40.0, "real") is True
 
-    # H100 / A100 80 GB runs 12B, 26B, and 35B in BF16 cleanly
-    for spec in (g12, g26, ink, q35):
+    # H100 / A100 80 GB runs 12B, 26B, and Inkling in BF16 cleanly
+    for spec in (g12, g26, ink):
         assert should_use_4bit(spec, 80.0, "baseline_zeroshot") is False
         assert should_use_4bit(spec, 80.0, "real") is False
 
@@ -137,8 +139,14 @@ def test_generated_notebook_valid_json_ast_and_public_only(tmp_path: Path) -> No
         "userdata",
         "should_use_4bit",
         "PUBLISH_TO_HF_DATASET",
-        "INCLUDE_BENTHAM",
-        "parse_page_xml_lines",
+        "assign_revcity_item_groups",
+        "FINAL_FREEZE_EVAL_TEST_PUBLIC",
+        "swap_images",
+        "score_line_breaks",
+        "paired_bootstrap_ci",
+        "prefer_gold_chosen=True",
+        "_eval_scores_{cache_key}",
+        "hard_case_panel",
         "USE_GOOGLE_DRIVE",
         "llm_int8_skip_modules",
         "gradient_checkpointing_kwargs",
@@ -147,6 +155,7 @@ def test_generated_notebook_valid_json_ast_and_public_only(tmp_path: Path) -> No
         "image_seq_length = 1120",
         "attn_implementation",
         "MAX_SEQ_LEN = 4096",
+        "MAX_EVAL_NEW_TOKENS = 2048",
         "torch.equal",
         "_resolve_turn_terminator",
         "has_live_vision_grad",
@@ -164,6 +173,8 @@ def test_generated_notebook_valid_json_ast_and_public_only(tmp_path: Path) -> No
     )
     for marker in expected_markers:
         assert marker in raw_text, f"Missing expected notebook marker: {marker}"
+    for forbidden in ("q" + "wen", "1164" + "045", "include_ben" + "tham", "worst3_failures_public_test"):
+        assert forbidden not in raw_text.lower(), f"Forbidden stale string in notebook: {forbidden}"
     assert "upgrade transformers peft accelerate bitsandbytes rapidfuzz pyyaml pillow" not in raw_text
 
     nb = json.loads(raw_text)

@@ -12,16 +12,15 @@ CELL_1_MD_SOURCE = """
 This notebook mirrors our high-resolution, trainable-vision, sham-controlled training harness while strictly restricting datasets and models to competition-eligible open resources:
 
 1. **Data (100% Public & Rights-Cleared):**
-   - **Revolutionary City HTR Corpus** (Zenodo `15776323`, **CC-BY-4.0**) downloaded directly to Colab SSD, parsed from ALTO-XML, cleaned via `eahtr.hygiene.clean_diplomatic_target` (stripping `[...]` editorial brackets and malformed standalone `-` lines), filtered for duplicate-line slips, and split deterministically by series (`train` / `val` / `test_public`) with zero document, writer, image SHA-256, or 32-word n-gram leakage.
-   - **Optional Library of Congress *By the People*** (`LCCN 2020446971`, **Public Domain**) behind `INCLUDE_LOC_BY_THE_PEOPLE = False` (skipping tabular leader-dot pages).
-   - **Candidate Apache-2.0 Models:**
-   - `gemma4_12b` (`google/gemma-4-12B-it`, default, ungated) — encoder-free dense VLM
-   - `gemma4_26b_a4b` (`google/gemma-4-26B-A4B-it`, ungated) — 26B/4B-active MoE VLM
-   - `inkling2_mini` (`thinkingmachines/Inkling-2-Mini`) — 26.4B `modelopt` NVFP4 (`inkling2_loop`, gated on upstream loader support; Halo cluster track uses `thinkingmachines/Inkling-2-Small`)
-   - `qwen36_35b_a3b` (`Qwen/Qwen3.6-35B-A3B`) — 35B/3B-active MoE VLM
-3. **Evaluation & Stage 2 VLM SMPO/DPO Rollout Prep:**
-   - Evaluates strict/lenient WER & CER (with independent `rapidfuzz` recount), repetition loops, non-termination, editorial bracket leakage, modernization counts, silent thinking leaks, and mean verifiable `eahtr.rewards` score, plus a matched-compute `sham_short` control.
-   - Optional Cell 7 generates and scores $K=4$ multi-temperature rollouts for Halo Stage 2 **VLM SMPO/DPO** (`*_vlm_preferences.jsonl`) and text-only GRPO contingency (`*_scored_offline_grpo_rollouts.jsonl`).
+   - **Revolutionary City HTR Corpus** (Zenodo `15776323`, **CC-BY-4.0**) downloaded directly to Colab SSD (pairing `.jpg`/`.jpeg` and `.png` pages with ALTO-XML), parsed geometrically via `eahtr.corpus.parse_alto_xml_lines`, cleaned via `eahtr.hygiene.clean_diplomatic_target`, grouped across adjacent item/recto-verso IDs via `assign_revcity_item_groups`, and split **before** smoke subsampling with zero document, writer, image SHA-256, perceptual dHash, or 32-word n-gram leakage.
+   - **Optional Library of Congress *By the People*** (`LCCN 2020446971`, **Public Domain**) behind `INCLUDE_LOC_BY_THE_PEOPLE = False` as a genre-shift challenge panel (`hard_case_panel.jsonl` also captures blanks/leader-dots/duplicates).
+2. **Candidate Apache-2.0 Models:**
+   - `gemma4_12b` (`google/gemma-4-12B-it`, **primary submission candidate**, ungated) — encoder-free dense VLM (`Stage 1 SFT` → conditional `Stage 2 VLM SMPO` with `chosen_sft_ratio: 1.0`).
+   - `gemma4_26b_a4b` (`google/gemma-4-26B-A4B-it`, deferred unless validated cleanly) — 26B/4B-active MoE VLM.
+   - `inkling2_mini` (`thinkingmachines/Inkling-2-Mini`, blocked on NVFP4 loader) — Halo cluster track tests conditional `thinkingmachines/Inkling-2-Small` after Dec 1.
+3. **Dev Discipline, Evaluation & Stage 2 Rollouts:**
+   - Development runs score **validation (`val`) ONLY** (with hash-keyed caches, same-checkpoint image-swap checks, strict/lenient + newline/line-boundary + order-tolerant CER, dual-convention zero-shot scoring, and verifiable `eahtr.rewards`). `test_public` remains frozen until final checkpoint freeze.
+   - Optional Cell 7 generates and scores $K=4$ multi-temperature rollouts from the merged SFT model for Halo Stage 2 **VLM SMPO** (`chosen_sft_ratio: 1.0`).
 
 > **Halo Competition Rule Note (Terms §§ 4.2 & 5):** Pre-Dec-1 Colab runs establish baseline benchmarks, data hygiene, vision-gradient flow, and VLM preference rollouts on the competition corpus. Final competition submissions after Dec 1 must be reproduced by the official **Halo** training recipe (`github.com/whitecircle/halo`) under published Track Rules.
 """
@@ -81,22 +80,23 @@ else:
 subprocess.run(['pip', 'install', '-q', '--no-deps', '-e', str(REPO_DIR)], check=True)
 
 from eahtr.colab_pipeline import (
-    BENTHAM_ICFHR2016_ZENODO_URL,
     COMPETITION_CANDIDATES,
     DIPLOMATIC_PROMPT,
     LOC_WASHINGTON_ITEM_JSON_URL,
     REVCITY_ZENODO_URL,
     assign_deterministic_split,
+    assign_revcity_item_groups,
     make_sham_derangement,
+    parse_revcity_stem_id,
     resolve_vision_modules_to_save,
     should_use_4bit,
     validate_competition_candidate,
 )
-from eahtr.corpus import filter_corpus_record, parse_alto_xml_lines, parse_page_xml_lines
+from eahtr.corpus import detect_two_page_opening, filter_corpus_record, parse_alto_xml_lines, parse_page_xml_lines
 from eahtr.hf_dataset import push_splits_to_hf_hub
-from eahtr.hygiene import audit_split_disjointness, clean_diplomatic_target
-from eahtr.metrics import normalize_strict, score_pair
-from eahtr.rewards import build_preference_pairs, score_group_completions, score_transcription
+from eahtr.hygiene import audit_split_disjointness, clean_diplomatic_target, compute_dhash
+from eahtr.metrics import normalize_preserve_newlines, normalize_strict, paired_bootstrap_ci, score_line_breaks, score_pair
+from eahtr.rewards import build_preference_pairs, recommended_max_new_tokens, score_group_completions, score_transcription
 
 assert torch.cuda.is_available(), 'CUDA GPU required (select L4 24GB, A100 40GB, or A100 80GB in Colab Pro)'
 GPU_NAME = torch.cuda.get_device_name(0)
@@ -138,7 +138,7 @@ WORK_ROOT.mkdir(parents=True, exist_ok=True)
 SMOKE_TEST_MODE = True
 
 # Select which Apache-2.0 competition candidates to run:
-# Available keys: ['gemma4_12b', 'gemma4_26b_a4b', 'inkling2_mini', 'qwen36_35b_a3b']
+# Available keys: ['gemma4_12b', 'gemma4_26b_a4b', 'inkling2_mini']
 CANDIDATE_KEYS = ['gemma4_12b']
 ARMS = ['baseline_zeroshot', 'real', 'sham_short']
 SHAM_MAX_PRESENTATIONS = 128 if SMOKE_TEST_MODE else 504
@@ -146,16 +146,13 @@ SHAM_MAX_PRESENTATIONS = 128 if SMOKE_TEST_MODE else 504
 # Public rights-cleared datasets (CC-BY-4.0 / Public Domain ONLY)
 INCLUDE_REVCITY = True
 REVCITY_MAX_PAGES = 400 if SMOKE_TEST_MODE else None
-VAL_FRACTION = 0.075
-TEST_FRACTION = 0.075
+VAL_FRACTION = 0.10
+TEST_FRACTION = 0.10
+PORTAL_CREATOR_MAP_PATH = ''  # Optional JSON mapping revcity stem/item IDs to creator/hand IDs
 
-# Optional Public Domain LOC By the People (LCCN 2020446971) polite fetcher
+# Optional Public Domain LOC By the People (LCCN 2020446971) challenge eval
 INCLUDE_LOC_BY_THE_PEOPLE = False
 LOC_MAX_PAGES = 150  # Polite cap when enabled
-
-# Optional CC-BY-4.0 Bentham ICFHR-2016 HTR corpus (Zenodo 1164045; train-only to keep eval writers disjoint)
-INCLUDE_BENTHAM = False
-BENTHAM_MAX_PAGES = 200  # Cap when enabled
 
 # Training hyperparameters (full-resolution trainable-vision SFT setup)
 SEED = 20261125
@@ -169,9 +166,9 @@ WEIGHT_DECAY = 0.01
 WARMUP_RATIO = 0.05
 GRAD_ACCUM_STEPS = 8
 MAX_SEQ_LEN = 4096
-MAX_EVAL_NEW_TOKENS = 1536
-VAL_EVAL_MAX_PAGES = 24 if SMOKE_TEST_MODE else 48
-TEST_EVAL_MAX_PAGES = 32 if SMOKE_TEST_MODE else 64  # Set None for entire held-out public test split
+MAX_EVAL_NEW_TOKENS = 2048
+VAL_EVAL_MAX_PAGES = 32 if SMOKE_TEST_MODE else 128
+FINAL_FREEZE_EVAL_TEST_PUBLIC = False  # Keep False during dev; test_public is frozen for final eval only
 
 # Optional Hugging Face Hub Dataset export (strictly public/CC-BY-4.0 splits only)
 PUBLISH_TO_HF_DATASET = False

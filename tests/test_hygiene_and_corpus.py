@@ -5,6 +5,7 @@ import xml.etree.ElementTree as ET
 import pytest
 
 from eahtr.corpus import (
+    detect_two_page_opening,
     filter_corpus_record,
     parse_alto_xml_lines,
     parse_page_xml_lines,
@@ -13,15 +14,16 @@ from eahtr.corpus import (
 from eahtr.hygiene import (
     audit_split_disjointness,
     clean_diplomatic_target,
+    dhash_hamming_distance,
     has_adjacent_duplicate_lines,
     has_table_leader_dots,
 )
 
 
 def test_clean_diplomatic_target_strips_brackets_carets_and_dash_lines() -> None:
-    raw = "ſir, I am^2 [the] bearer\n-\n   of   theſe  [lines].\n"
+    raw = "ſir, I am^2 [the] bearer\n-\n   of   theſe  [lines] m[_]ung.\n"
     cleaned = clean_diplomatic_target(raw)
-    assert cleaned == "sir, I am2 bearer\nof these ."
+    assert cleaned == "sir, I am2 bearer\nof these mung."
 
 
 def test_duplicate_lines_and_leader_dots_detection() -> None:
@@ -48,40 +50,41 @@ def test_parse_alto_xml_lines_extracts_ordered_text() -> None:
     alto = """<?xml version="1.0" encoding="UTF-8"?>
     <alto xmlns="http://www.loc.gov/standards/alto/ns-v4#">
       <Layout>
-        <Page ID="P1">
-          <PrintSpace>
-            <TextBlock ID="TB1">
-              <TextLine ID="TL1">
-                <String CONTENT="Head"/>
-                <String CONTENT="Quarters"/>
-              </TextLine>
-              <TextLine ID="TL2">
-                <String CONTENT="July"/>
-                <String CONTENT="1779"/>
-              </TextLine>
+        <Page ID="P1" WIDTH="2000" HEIGHT="1500">
+          <PrintSpace HPOS="0" VPOS="0" WIDTH="2000" HEIGHT="1500">
+            <TextBlock ID="TB_M" TYPE="marginalia" HPOS="50" VPOS="40" WIDTH="100" HEIGHT="30">
+              <TextLine ID="TLM" VPOS="40" HPOS="50"><String CONTENT="Note"/></TextLine>
+            </TextBlock>
+            <TextBlock ID="TB_R" HPOS="1200" VPOS="100" WIDTH="500" HEIGHT="200">
+              <TextLine ID="TLR" VPOS="100" HPOS="1200"><String CONTENT="Right"/><String CONTENT="Col"/></TextLine>
+            </TextBlock>
+            <TextBlock ID="TB_L" HPOS="150" VPOS="100" WIDTH="500" HEIGHT="200">
+              <TextLine ID="TL1" VPOS="100" HPOS="150"><String CONTENT="Head"/><String CONTENT="Quarters"/></TextLine>
+              <TextLine ID="TL2" VPOS="140" HPOS="150"><String CONTENT="July"/><String CONTENT="1779"/></TextLine>
             </TextBlock>
           </PrintSpace>
         </Page>
       </Layout>
     </alto>
     """
-    assert parse_alto_xml_lines(alto) == ["Head Quarters", "July 1779"]
+    assert parse_alto_xml_lines(alto) == ["Head Quarters", "July 1779", "Right Col", "Note"]
+    assert detect_two_page_opening(alto) is True
 
 
 def test_parse_page_xml_lines_extracts_ordered_text() -> None:
     page_xml = """<?xml version="1.0" encoding="UTF-8"?>
     <PcGts xmlns="http://schema.primaresearch.org/PAGE/gts/pagecontent/2013-07-15">
-      <Page imageFilename="bentham_001.jpg" imageWidth="1000" imageHeight="1500">
+      <Page imageFilename="ledger_001.jpg" imageWidth="1000" imageHeight="1500">
         <TextRegion id="r1">
           <TextLine id="l1">
             <Coords points="0,0 100,0 100,20 0,20"/>
-            <Word id="w1"><TextEquiv><Unicode>Mr.</Unicode></TextEquiv></Word>
-            <Word id="w2"><TextEquiv><Unicode>Bentham</Unicode></TextEquiv></Word>
-            <TextEquiv><Unicode>Mr. Bentham observes</Unicode></TextEquiv>
+            <Word id="w1"><TextEquiv><Unicode>Col.</Unicode></TextEquiv></Word>
+            <Word id="w2"><TextEquiv><Unicode>Washington</Unicode></TextEquiv></Word>
+            <TextEquiv><Unicode>Col. Washington observes</Unicode></TextEquiv>
           </TextLine>
           <TextLine id="l2">
-            <Word id="w3"><TextEquiv><Unicode>that</Unicode></TextEquiv></Word>
-            <Word id="w4"><TextEquiv><Unicode>Public Utility</Unicode></TextEquiv></Word>
+            <Word id="w3"><TextEquiv><Unicode>our</Unicode></TextEquiv></Word>
+            <Word id="w4"><TextEquiv><Unicode>Public Stores</Unicode></TextEquiv></Word>
           </TextLine>
           <TextLine id="l3">
             <TextEquiv><Unicode>   </Unicode></TextEquiv>
@@ -91,8 +94,8 @@ def test_parse_page_xml_lines_extracts_ordered_text() -> None:
     </PcGts>
     """
     assert parse_page_xml_lines(page_xml) == [
-        "Mr. Bentham observes",
-        "that Public Utility",
+        "Col. Washington observes",
+        "our Public Stores",
     ]
     assert parse_page_xml_lines("<PcGts><Page><TextRegion><TextLine><TextEquiv><Unicode></Unicode></TextEquiv></TextLine></TextRegion></Page></PcGts>") == []
     with pytest.raises(ET.ParseError):
@@ -172,3 +175,12 @@ def test_audit_split_disjointness_catches_all_leak_vectors() -> None:
     short_report = audit_split_disjointness(short_dup_train, short_dup_eval, ngram_size=32)
     assert short_report["passed"] is False
     assert short_report["exact_text_collisions"] == 1
+
+    assert dhash_hamming_distance("ffffffffffffffff", "fffffffffffffffe") == 1
+    dhash_report = audit_split_disjointness(
+        [{"record_id": "t1", "document_id": "dt1", "writer_key": "wt1", "image_sha256": "st1", "image_dhash": "0000000000000000", "text": "alpha beta gamma"}],
+        [{"record_id": "e1", "document_id": "de1", "writer_key": "we1", "image_sha256": "se1", "image_dhash": "0000000000000001", "text": "delta epsilon zeta"}],
+        max_dhash_distance=4,
+    )
+    assert dhash_report["passed"] is False
+    assert dhash_report["perceptual_image_collisions"] == [("t1", "e1", 1)]

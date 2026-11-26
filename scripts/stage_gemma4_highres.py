@@ -14,6 +14,7 @@ from eahtr.halo_smoke import prepare_gemma4_highres_dir
 def main() -> int:
     parser = argparse.ArgumentParser(description="Stage a local Gemma 4 high-res (1120 tokens) model directory.")
     parser.add_argument("--model", required=True, help="HF repo ID (e.g. google/gemma-4-12B-it) or local dir")
+    parser.add_argument("--revision", default=None, help="Optional pinned HF commit SHA (e.g. 43c9d014b231)")
     parser.add_argument("--out-dir", type=Path, required=True, help="Output staged directory path")
     parser.add_argument("--max-soft-tokens", type=int, default=1120, help="Target Gemma 4 vision token budget")
     args = parser.parse_args()
@@ -25,6 +26,7 @@ def main() -> int:
         src = Path(
             snapshot_download(
                 args.model,
+                revision=args.revision,
                 allow_patterns=["*.json", "*.jinja", "*.model", "*.safetensors*", "*.tiktoken"],
             )
         )

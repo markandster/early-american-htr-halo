@@ -11,6 +11,7 @@ from eahtr.rewards import (
     count_editorial_leaks,
     count_modernizations,
     detect_repetition_loop,
+    recommended_max_new_tokens,
     score_group_completions,
     score_jsonl_file,
     score_transcription,
@@ -156,10 +157,39 @@ def test_build_preference_pairs_selection_filtering_and_error_guards() -> None:
     with pytest.raises(ValueError, match="image_path"):
         build_preference_pairs([{"record_id": "no-img", "text": ref, "completions": [ref, "other"]}])
 
+    assert detect_repetition_loop("Ditto\nDitto\nDitto\nDitto\nDitto", reference="Ditto\nDitto\nDitto\nDitto\nDitto")[0] is False
+    assert recommended_max_new_tokens(1200) == 2048
+    assert recommended_max_new_tokens(2000) == 3000
+
     with pytest.raises(ValueError, match="finish_reasons"):
         build_preference_pairs(
             [{"record_id": "bad-fr", "image_path": "/tmp/p.jpg", "text": ref, "completions": [ref, "x"], "finish_reasons": ["stop"]}]
         )
+
+    blank_chosen_guard = build_preference_pairs(
+        [{"record_id": "g1", "image_path": "/tmp/p1.jpg", "text": ref, "completions": ["   ", "Head Quarters\n-\n-\n-\n-\n-"], "finish_reasons": ["stop", "length"]}],
+        min_reward_margin=0.05,
+        prefer_gold_chosen=True,
+    )
+    assert len(blank_chosen_guard) == 1
+    assert blank_chosen_guard[0]["chosen"] == [{"role": "assistant", "content": ref}]
+    assert blank_chosen_guard[0]["chosen_source"] == "gold"
+    assert blank_chosen_guard[0]["rejected_is_loop"] is True
+    assert blank_chosen_guard[0]["rejected_is_budget_capped"] is False
+
+    capped_rec = build_preference_pairs(
+        [{"record_id": "cap1", "image_path": "/tmp/p2.jpg", "text": ref, "max_new_tokens_cap": 8, "completions": [ref, "Head Quarters July"], "finish_reasons": ["stop", "length"]}],
+        min_reward_margin=0.05,
+    )
+    assert len(capped_rec) == 1
+    assert capped_rec[0]["rejected_is_loop"] is False
+    assert capped_rec[0]["rejected_is_budget_capped"] is True
+
+    newline_dup = build_preference_pairs(
+        [{"record_id": "nd", "image_path": "/tmp/p2.jpg", "text": "Sir\nI am yours", "completions": ["Sir\nI am yours", "Sir I am yours"], "finish_reasons": ["stop", "stop"]}],
+        min_reward_margin=0.01,
+    )
+    assert newline_dup == []
 
 
 def test_score_transcription_precompiled_regex_speed() -> None:

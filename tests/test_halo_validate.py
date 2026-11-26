@@ -22,6 +22,7 @@ from eahtr.halo_smoke import (
     select_pytorch_cuda_index,
     verify_halo_run_log_finite_loss,
     verify_processor_image_tokens,
+    verify_stage_continuity_logprobs,
     verify_train_sample_image_tokens,
     write_halo_smoke_notebook,
 )
@@ -49,6 +50,15 @@ def test_tier1_validator_rejects_yaml11_boolean_and_ep_all_linear(tmp_path: Path
     )
     with pytest.raises(ValueError, match="all-linear is forbidden"):
         validate_yaml_configs_tier1(bad_ep_dir, repo_root=tmp_path)
+
+    bad_smpo_dir = tmp_path / "bad_smpo"
+    bad_smpo_dir.mkdir()
+    (bad_smpo_dir / "bad_vlm_smpo.yaml").write_text(
+        "bf16: true\nloss_type: smooth_lower_bound\nuse_margin_schedule: true\nuse_peft: true\nlora_dropout: 0.0\nlearning_rate: 5.0e-6\nchosen_sft_ratio: 0.25\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="chosen_sft_ratio: 1.0"):
+        validate_yaml_configs_tier1(bad_smpo_dir, repo_root=tmp_path)
 
 
 def test_tier2_validator_fails_closed_on_missing_repo_and_surfaces_mocked_errors(
@@ -129,7 +139,10 @@ def test_filter_vlm_rows_post_expansion_and_vram_smoke_configs(tmp_path: Path) -
     assert validate_yaml_configs_tier1(tmp_path / "sm24", repo_root=repo_root)["count"] == 2
     assert sft_cfg["bf16"] is True
     assert sft_cfg["max_steps"] == 5
-    assert sft_cfg["save_strategy"] == "no"
+    assert sft_cfg["save_strategy"] == "steps"
+    assert sft_cfg["save_steps"] == 5
+    assert smpo_cfg["model_name_or_path"] == str(tmp_path / "sm24" / "sft_merged")
+    assert smpo_cfg["chosen_sft_ratio"] == 1.0
     assert smpo_cfg["max_length"] == 2048
     assert smpo_cfg["max_prompt_length"] == 1350
 
@@ -201,6 +214,14 @@ def test_verify_processor_image_tokens_and_run_log_losses(tmp_path: Path, monkey
     log_ok = tmp_path / "ok.log"
     log_ok.write_text("{'loss': 1.42, 'grad_norm': 0.5}\n{'loss': 0.91}\n", encoding="utf-8")
     assert verify_halo_run_log_finite_loss(log_ok) == [1.42, 0.91]
+    with pytest.raises(ValueError, match="< 5"):
+        verify_halo_run_log_finite_loss(log_ok, min_steps=5)
+    cont = verify_stage_continuity_logprobs([-2.0, -1.5], [-1.2, -0.9], [-1.2001, -0.9])
+    assert cont["max_step0_diff"] <= 1e-3
+    with pytest.raises(ValueError, match="diverged from merged SFT"):
+        verify_stage_continuity_logprobs([-2.0, -1.5], [-1.2, -0.9], [-2.0, -1.5])
+    with pytest.raises(ValueError, match="indistinguishable from base"):
+        verify_stage_continuity_logprobs([-1.2, -0.9], [-1.2, -0.9], [-1.2, -0.9])
 
     log_nan = tmp_path / "nan.log"
     log_nan.write_text("{'loss': nan}\n", encoding="utf-8")
@@ -209,7 +230,7 @@ def test_verify_processor_image_tokens_and_run_log_losses(tmp_path: Path, monkey
 
     log_empty = tmp_path / "empty.log"
     log_empty.write_text("training completed with no metrics\n", encoding="utf-8")
-    with pytest.raises(ValueError, match="No training loss metrics"):
+    with pytest.raises(ValueError, match="Found 0 training loss metrics"):
         verify_halo_run_log_finite_loss(log_empty)
 
 
@@ -257,19 +278,27 @@ def test_halo_export_helpers_and_dir_verifier(tmp_path: Path, monkeypatch: pytes
     assert pref_meta["include_margin"] is True
     assert "margin" in saved_dicts[-1][1]["train"].data
 
+    with pytest.raises(ValueError, match="Split disjointness"):
+        export_halo_vlm_preference_dataset(pair_train, pair_train, tmp_path / "bad_pref", lambda s: len(s.split()))
+
     ok_dir = tmp_path / "ok_mlx"
     ok_dir.mkdir()
     (ok_dir / "processor_config.json").write_text(
         json.dumps({"image_seq_length": 1120, "image_processor": {"max_soft_tokens": 1120, "image_seq_length": 1120}}),
         encoding="utf-8",
     )
-    (ok_dir / "chat_template.jinja").write_text("{%- set eff = 0.0 -%}", encoding="utf-8")
+    g4_tpl = (Path(__file__).resolve().parents[1] / "configs" / "halo" / "templates" / "gemma4_htr_nothink.jinja").read_text(encoding="utf-8")
+    (ok_dir / "chat_template.jinja").write_text(g4_tpl, encoding="utf-8")
     assert verify_exported_vlm_dir(ok_dir)["image_seq_length"] == 1120
 
     bad_dir = tmp_path / "bad_mlx"
     bad_dir.mkdir()
     with pytest.raises(FileNotFoundError, match="processor_config.json"):
         verify_exported_vlm_dir(bad_dir)
+
+    (ok_dir / "chat_template.jinja").write_text("unrelated", encoding="utf-8")
+    with pytest.raises(ValueError, match="missing non-thinking"):
+        verify_exported_vlm_dir(ok_dir)
 
     (ok_dir / "chat_template.jinja").write_text("Thinking effort level: 0.9", encoding="utf-8")
     with pytest.raises(ValueError, match="0.9 reasoning-effort"):

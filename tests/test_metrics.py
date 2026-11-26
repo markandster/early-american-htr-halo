@@ -1,6 +1,13 @@
 """Unit tests for strict and lenient diplomatic WER/CER scoring."""
 
-from eahtr.metrics import normalize_lenient, normalize_strict, score_pair
+from eahtr.metrics import (
+    normalize_lenient,
+    normalize_preserve_newlines,
+    normalize_strict,
+    paired_bootstrap_ci,
+    score_line_breaks,
+    score_pair,
+)
 
 
 def test_normalize_strict_preserves_case_and_punctuation() -> None:
@@ -38,3 +45,19 @@ def test_score_pair_empty_reference_handling() -> None:
     hallucinated = score_pair("Some invented text", "")
     assert hallucinated["strict"].wer == 1.0
     assert hallucinated["strict"].cer == 1.0
+
+
+def test_line_break_order_tolerant_and_bootstrap_ci() -> None:
+    assert normalize_preserve_newlines("Line  one \r\n\nLine\t two") == "Line one\nLine two"
+    exact = score_line_breaks("Line one\nLine two", "Line one\nLine two")
+    assert exact["newline_cer"] == 0.0
+    assert exact["line_boundary_f1"] == 1.0
+
+    reordered = score_line_breaks("Second block\nFirst block", "First block\nSecond block")
+    assert reordered["order_tolerant_cer"] == 0.0
+    assert reordered["newline_cer"] > 0.0
+
+    ci = paired_bootstrap_ci([-0.05, -0.04, -0.06, -0.03], ["doc1", "doc1", "doc2", "doc3"], n_boot=300, seed=7)
+    assert ci["mean"] < 0.0
+    assert ci["ci_high"] < 0.0
+    assert ci["n_clusters"] == 3.0

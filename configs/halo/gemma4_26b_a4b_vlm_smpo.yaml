@@ -3,8 +3,8 @@
 # Note: FORWARD_ROWS_PER_EXAMPLE (2) * max_length (4096) = 8192 <= HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK.
 # Launch from repo root: torchrun --nproc_per_node=8 /path/to/halo/scripts/training/preference/smpo.py configs/halo/gemma4_26b_a4b_vlm_smpo.yaml
 
-# --- Model ---
-model_name_or_path: checkpoints/gemma4-26b-a4b-eahtr-sft
+# --- Model (merged Stage 1 SFT HF directory) ---
+model_name_or_path: checkpoints/gemma4-26b-a4b-eahtr-sft-merged
 attn_implementation: sdpa
 moe_balancing: none
 bf16: true
@@ -19,7 +19,7 @@ dataset:
 
 # --- SMPO objective & margin schedule ---
 loss_type: smooth_lower_bound
-chosen_sft_ratio: 0.75
+chosen_sft_ratio: 1.0
 beta: 1.0
 use_margin_schedule: true
 initial_margin: 0.2

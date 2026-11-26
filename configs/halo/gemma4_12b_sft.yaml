@@ -1,8 +1,8 @@
 # Halo VLM SFT — Gemma-4 12B-IT on rights-cleared 18th-century diplomatic HTR.
 # Aligned with whitecircle/halo (agent-docs/models/gemma4.md & agent-docs/training-methods/sft.md).
-# Note: Prepare a local staged processor dir with max_soft_tokens=1120 and image_seq_length=1120
-# before launching Halo (Halo apply_vision_options only sets min_pixels/max_pixels).
-# Launch from repo root: torchrun --nproc_per_node=1 /path/to/halo/scripts/training/sft.py configs/halo/gemma4_12b_sft.yaml
+# Note: Launch via scripts/run_gemma4_halo.sh so scripts/stage_gemma4_highres.py stages a 1120-token
+# processor dir at pinned rev 43c9d014b231 and overrides --model_name_or_path automatically.
+# Direct launch (from repo root): torchrun --nproc_per_node=1 /path/to/halo/scripts/training/sft.py configs/halo/gemma4_12b_sft.yaml --model_name_or_path=<staged_1120_dir>
 
 # --- Model ---
 model_name_or_path: google/gemma-4-12B-it

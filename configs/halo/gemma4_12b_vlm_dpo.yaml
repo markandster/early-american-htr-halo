@@ -2,8 +2,8 @@
 # Uses PEFT implicit adapter-disabled reference (DataCollatorForVisionPreference).
 # Launch from repo root: torchrun --nproc_per_node=1 /path/to/halo/scripts/training/preference/dpo.py configs/halo/gemma4_12b_vlm_dpo.yaml
 
-# --- Model ---
-model_name_or_path: checkpoints/gemma4-12b-eahtr-sft
+# --- Model (merged Stage 1 SFT HF directory) ---
+model_name_or_path: checkpoints/gemma4-12b-eahtr-sft-merged
 attn_implementation: sdpa
 bf16: true
 

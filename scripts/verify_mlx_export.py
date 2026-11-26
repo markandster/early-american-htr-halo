@@ -15,6 +15,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Verify merged HF or converted MLX VLM checkpoint directory.")
     parser.add_argument("model_dir", type=Path, help="Path to merged_hf or mlx_out directory")
     parser.add_argument("--expected-soft-tokens", type=int, default=1120)
+    parser.add_argument("--model-family", choices=("gemma4", "inkling2"), default="gemma4")
+    parser.add_argument("--reference-dir", type=Path, default=None, help="Optional base/staged dir for tokenized parity check")
     parser.add_argument("--skip-gemma4-resolution", action="store_true")
     parser.add_argument("--skip-template-check", action="store_true")
     args = parser.parse_args()
@@ -25,6 +27,8 @@ def main() -> int:
             expected_soft_tokens=args.expected_soft_tokens,
             check_gemma4_resolution=not args.skip_gemma4_resolution,
             check_nothink_template=not args.skip_template_check,
+            model_family=args.model_family,
+            reference_dir=args.reference_dir,
         )
     except Exception as exc:
         print(f"[ERROR] Export verification failed: {exc}", file=sys.stderr)

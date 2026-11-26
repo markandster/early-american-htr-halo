@@ -148,6 +148,34 @@ def export_halo_vlm_preference_dataset(
                 dropped += 1
         return kept, dropped
 
+    def _pair_audit_rows(pairs: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for idx, row in enumerate(pairs):
+            imgs = row.get("images") or ([row["image_path"]] if row.get("image_path") else [])
+            rows.append(
+                {
+                    "record_id": row.get("record_id", f"pair_{idx}"),
+                    "document_id": row.get("document_id") or row.get("group_key") or "",
+                    "writer_key": row.get("writer_key") or "",
+                    "image_sha256": row.get("image_sha256") or "",
+                    "image_dhash": row.get("image_dhash") or "",
+                    "image_path": str(imgs[0]) if imgs else "",
+                    "text": _extract_text(row.get("chosen")),
+                }
+            )
+        return rows
+
+    train_audit_rows = _pair_audit_rows(train_pairs)
+    test_audit_rows = _pair_audit_rows(test_pairs)
+    audit = audit_split_disjointness(train_audit_rows, test_audit_rows)
+    path_collisions = sorted(
+        {r["image_path"] for r in train_audit_rows if r["image_path"]}
+        & {r["image_path"] for r in test_audit_rows if r["image_path"]}
+    )
+    if not audit["passed"] or path_collisions:
+        audit["image_path_collisions"] = path_collisions
+        raise ValueError(f"Split disjointness check failed before Halo preference export: {audit}")
+
     kept_train, drop_train = _filter_pairs(train_pairs)
     kept_test, drop_test = _filter_pairs(test_pairs)
     if not kept_train or not kept_test:
@@ -196,13 +224,15 @@ def verify_exported_vlm_dir(
     expected_soft_tokens: int = 1120,
     check_gemma4_resolution: bool = True,
     check_nothink_template: bool = True,
+    model_family: str = "gemma4",
+    reference_dir: Path | None = None,
 ) -> dict[str, Any]:
-    """Fail closed if merged/MLX directory lost Gemma 4 resolution or non-thinking template."""
+    """Fail closed if merged/MLX directory lost resolution, template rendering, or token parity."""
     if not model_dir.is_dir():
         raise FileNotFoundError(f"Exported model directory not found: {model_dir}")
 
-    checked_fields: dict[str, Any] = {"model_dir": str(model_dir)}
-    if check_gemma4_resolution:
+    checked_fields: dict[str, Any] = {"model_dir": str(model_dir), "model_family": model_family}
+    if check_gemma4_resolution and model_family == "gemma4":
         proc_path = model_dir / "processor_config.json"
         if not proc_path.is_file():
             raise FileNotFoundError(f"Missing required {proc_path} in Gemma 4 export directory")
@@ -224,6 +254,16 @@ def verify_exported_vlm_dir(
         checked_fields["image_seq_length"] = expected_soft_tokens
 
     if check_nothink_template:
+        from jinja2 import BaseLoader, Environment
+        from jinja2.ext import Extension
+
+        class _GenTagExt(Extension):
+            tags = {"generation"}
+
+            def parse(self, parser: Any) -> Any:
+                next(parser.stream)
+                return parser.parse_statements(["name:endgeneration"], drop_needle=True)
+
         tpl_text = ""
         jinja_path = model_dir / "chat_template.jinja"
         tok_cfg_path = model_dir / "tokenizer_config.json"
@@ -237,6 +277,36 @@ def verify_exported_vlm_dir(
             raise ValueError(f"{model_dir}: missing chat_template.jinja and tokenizer_config.json chat_template")
         if "else 0.9" in tpl_text or "Thinking effort level: 0.9" in tpl_text:
             raise ValueError(f"{model_dir}: detected Inkling 0.9 reasoning-effort default instead of 0.0")
+        env = Environment(loader=BaseLoader(), extensions=[_GenTagExt])
+        env.globals["raise_exception"] = lambda msg: (_ for _ in ()).throw(ValueError(msg))
+        tpl = env.from_string(tpl_text)
+        msg1 = [{"role": "user", "content": [{"type": "text", "text": "Transcribe."}]}]
+        msg2 = msg1 + [
+            {"role": "assistant", "content": [{"type": "text", "text": "Dear Sir"}]},
+            {"role": "user", "content": [{"type": "text", "text": "Next page."}]},
+        ]
+        r1 = tpl.render(messages=msg1, add_generation_prompt=True, enable_thinking=False, bos_token="", eos_token="", tools=None)
+        r1_default = tpl.render(messages=msg1, add_generation_prompt=True, bos_token="", eos_token="", tools=None)
+        r1_nogen = tpl.render(messages=msg1, add_generation_prompt=False, bos_token="", eos_token="", tools=None)
+        r2 = tpl.render(messages=msg2, add_generation_prompt=True, bos_token="", eos_token="", tools=None)
+        if not r2.startswith(r1_nogen) or r1 != r1_default:
+            raise ValueError(f"{model_dir}: chat template failed prefix-invariance or default-nothink parity")
+        if model_family == "gemma4" and ("<|turn>model" not in r1 or "<|channel>thought\n<channel|>" not in r1):
+            raise ValueError(f"{model_dir}: rendered Gemma 4 template missing non-thinking <|channel>thought\\n<channel|> sentinel")
+        if model_family == "inkling2" and (("Thinking effort level: 0<" not in r1 and "Thinking effort level: 0.0" not in r1) or "0.9" in r1):
+            raise ValueError(f"{model_dir}: rendered Inkling 2 template did not default to effort 0")
         checked_fields["chat_template_verified"] = True
+
+    if reference_dir is not None:
+        from transformers import AutoTokenizer
+
+        ref_tok = AutoTokenizer.from_pretrained(str(reference_dir))
+        exp_tok = AutoTokenizer.from_pretrained(str(model_dir))
+        sample = [{"role": "user", "content": [{"type": "text", "text": "Transcribe."}]}]
+        if ref_tok.eos_token_id != exp_tok.eos_token_id:
+            raise ValueError(f"{model_dir}: eos_token_id {exp_tok.eos_token_id} != reference {ref_tok.eos_token_id}")
+        if ref_tok.apply_chat_template(sample, tokenize=True, add_generation_prompt=True) != exp_tok.apply_chat_template(sample, tokenize=True, add_generation_prompt=True):
+            raise ValueError(f"{model_dir}: tokenized chat template diverged from {reference_dir}")
+        checked_fields["reference_token_parity"] = True
 
     return checked_fields

@@ -1,5 +1,6 @@
-# Halo VLM SMPO — Inkling-2-Small (frozen NVFP4/MXFP8 experts, EP=8 default Stage 2 Preference).
-# Default EP=8 fits ~60-65 GiB/GPU; override --expert_parallel_size=4 (4x B200) or 2 (2x B300).
+# Halo VLM SMPO — Inkling-2-Small (experimental Stage 2 over frozen NVFP4/MXFP8 experts).
+# Conditional on Dec 1 cluster serving/memory pilot and verified trainable expert-shard reload
+# (frozen-bank adapters cannot merge; default Inkling track uses Stage 1 SFT alone unless proven).
 # Launch from repo root: torchrun --nproc_per_node=8 /path/to/halo/scripts/training/preference/smpo.py configs/halo/inkling2_small_vlm_smpo.yaml
 
 # --- Model ---
@@ -21,7 +22,7 @@ dataset:
 
 # --- SMPO objective & margin schedule ---
 loss_type: smooth_lower_bound
-chosen_sft_ratio: 0.75
+chosen_sft_ratio: 1.0
 beta: 1.0
 use_margin_schedule: true
 initial_margin: 0.2

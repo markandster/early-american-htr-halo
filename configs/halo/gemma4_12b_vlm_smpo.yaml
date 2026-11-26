@@ -1,11 +1,11 @@
 # Halo VLM SMPO — Gemma-4 12B-IT (Stage 2 Verifiable Preference Optimization).
-# Reference-model-free SMPO over deterministic preference pairs scored by eahtr.rewards.
-# Note: Use a local staged processor dir (max_soft_tokens=1120, image_seq_length=1120) and pre-filtered
-# Arrow dataset (1120 + prompt_tokens <= 1600, chosen_tokens <= 2496, total <= 4096).
+# Reference-model-free SMPO over gold-anchored preference pairs scored by eahtr.rewards.
+# Note: Point --model_name_or_path at the merged Stage 1 SFT HF directory (1120 tokens + template; Halo
+# reject_adapter_directory refuses unmerged PEFT adapter dirs). Pre-filter Arrow rows to 1120+prompt<=1600.
 # Launch from repo root: torchrun --nproc_per_node=1 /path/to/halo/scripts/training/preference/smpo.py configs/halo/gemma4_12b_vlm_smpo.yaml
 
-# --- Model ---
-model_name_or_path: checkpoints/gemma4-12b-eahtr-sft
+# --- Model (merged Stage 1 SFT HF directory) ---
+model_name_or_path: checkpoints/gemma4-12b-eahtr-sft-merged
 attn_implementation: sdpa
 bf16: true
 
@@ -15,7 +15,7 @@ dataset:
 
 # --- SMPO objective & margin schedule ---
 loss_type: smooth_lower_bound
-chosen_sft_ratio: 0.75
+chosen_sft_ratio: 1.0
 beta: 1.0
 use_margin_schedule: true
 initial_margin: 0.2

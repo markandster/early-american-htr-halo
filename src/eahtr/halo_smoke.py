@@ -11,13 +11,13 @@ from typing import Any, Callable, Sequence
 
 import yaml
 
+from .candidates import DIPLOMATIC_PROMPT
 from .hygiene import clean_diplomatic_target
+from .revcity_range import fetch_revcity_smoke_sample
 
-DEFAULT_SMOKE_PROMPT = (
-    "Transcribe every word on this manuscript page using only the visible ink. "
-    "Preserve the writer's original spelling, capitalization, punctuation, "
-    "abbreviations, and line breaks. Do not modernize spelling or add commentary."
-)
+__all__ = ["fetch_revcity_smoke_sample"]
+
+DEFAULT_SMOKE_PROMPT = DIPLOMATIC_PROMPT
 _HALO_DOCKER_HINT = (
     "public.ecr.aws/whitecircle/halo:hopper-1.3.0rc2 or "
     "public.ecr.aws/whitecircle/halo:blackwell-1.3.0rc2"
@@ -198,6 +198,7 @@ def build_smoke_yaml_configs(
     out_dir: Path,
     *,
     model_dir: Path,
+    smpo_model_dir: Path | None = None,
     sft_dataset_dir: Path,
     smpo_dataset_dir: Path,
     vram_gb: float,
@@ -207,6 +208,7 @@ def build_smoke_yaml_configs(
     resolved_root = repo_root or base_sft_yaml.resolve().parents[2]
     out_dir.mkdir(parents=True, exist_ok=True)
     small_vram = vram_gb < 32.0
+    stage2_model = smpo_model_dir if smpo_model_dir is not None else out_dir / "sft_merged"
 
     def _patch(cfg: dict[str, Any], ds_path: Path, output_subdir: str, *, is_smpo: bool) -> dict[str, Any]:
         updated = dict(cfg)
@@ -217,7 +219,7 @@ def build_smoke_yaml_configs(
             updated["chat_template"] = str((resolved_root / updated["chat_template"]).resolve())
         updated.update(
             {
-                "model_name_or_path": str(model_dir),
+                "model_name_or_path": str(stage2_model if is_smpo else model_dir),
                 "bf16": True,
                 "dataset": [str(ds_path)],
                 "use_peft": True,
@@ -229,16 +231,18 @@ def build_smoke_yaml_configs(
                 "use_liger_kernel": False,
                 "log_decoded_samples": True,
                 "max_steps": 5,
-                "save_strategy": "no",
+                "save_strategy": "no" if is_smpo else "steps",
                 "eval_strategy": "no",
                 "report_to": "none",
                 "output_dir": str(out_dir / output_subdir),
             }
         )
         if is_smpo:
+            updated["chosen_sft_ratio"] = 1.0
             updated["max_length"] = 2048 if small_vram else 4096
             updated["max_prompt_length"] = 1350 if small_vram else 1600
         else:
+            updated["save_steps"] = 5
             updated["max_length"] = 4096
         return updated
 
@@ -298,8 +302,8 @@ def verify_processor_image_tokens(
 _LOSS_LOG_RE = re.compile(r"['\"]?loss['\"]?\s*[:=]\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?|nan|inf|-inf)", re.I)
 
 
-def verify_halo_run_log_finite_loss(log_path: Path) -> list[float]:
-    """Assert Halo training run log recorded >= 1 finite training loss and zero NaN/Inf."""
+def verify_halo_run_log_finite_loss(log_path: Path, *, min_steps: int = 1) -> list[float]:
+    """Assert Halo training run log recorded >= min_steps finite losses and zero NaN/Inf."""
     if not log_path.is_file():
         raise FileNotFoundError(f"Expected Halo run log not found: {log_path}")
     text = log_path.read_text(encoding="utf-8", errors="replace")
@@ -309,9 +313,32 @@ def verify_halo_run_log_finite_loss(log_path: Path) -> list[float]:
         if not math.isfinite(val):
             raise ValueError(f"Non-finite training loss {match.group(1)!r} detected in {log_path}")
         losses.append(val)
-    if not losses:
-        raise ValueError(f"No training loss metrics found in {log_path}")
+    if len(losses) < min_steps:
+        raise ValueError(f"Found {len(losses)} training loss metrics (< {min_steps}) in {log_path}")
     return losses
+
+
+def verify_stage_continuity_logprobs(
+    base_lps: Sequence[float],
+    sft_lps: Sequence[float],
+    stage2_step0_lps: Sequence[float],
+    *,
+    tol: float = 1e-3,
+    min_shift: float = 1e-4,
+) -> dict[str, Any]:
+    """Verify Stage 2 step-0 weights match Stage 1 merged SFT and diverge from base."""
+    if not sft_lps or len(base_lps) != len(sft_lps) or len(stage2_step0_lps) != len(sft_lps):
+        raise ValueError("Log-prob vectors must be non-empty and equal length")
+    for seq in (base_lps, sft_lps, stage2_step0_lps):
+        if any(not math.isfinite(float(v)) for v in seq):
+            raise ValueError("Non-finite log-prob in stage continuity check")
+    max_step0_diff = max(abs(float(a) - float(b)) for a, b in zip(sft_lps, stage2_step0_lps))
+    max_sft_shift = max(abs(float(a) - float(b)) for a, b in zip(base_lps, sft_lps))
+    if max_step0_diff > tol:
+        raise ValueError(f"Stage 2 step-0 log-probs diverged from merged SFT (diff={max_step0_diff:.6f} > {tol})")
+    if max_sft_shift < min_shift:
+        raise ValueError(f"Merged SFT log-probs indistinguishable from base (shift={max_sft_shift:.6f} < {min_shift})")
+    return {"max_step0_diff": max_step0_diff, "max_sft_shift": max_sft_shift, "n": len(sft_lps)}
 
 
 def verify_train_sample_image_tokens(sample_txt: Path, *, min_tokens: int = 281, max_tokens: int = 1120) -> int:

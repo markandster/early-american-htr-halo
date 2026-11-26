@@ -117,6 +117,8 @@ def _validate_single_tier1(yaml_path: Path, repo_root: Path) -> dict[str, Any]:
             raise ValueError(f"{name}: SMPO PEFT requires lora_dropout: 0.0")
         if cfg.get("use_peft") and float(cfg.get("learning_rate", 1.0)) > 5.0e-6:
             raise ValueError(f"{name}: SMPO PEFT requires learning_rate <= 5.0e-6")
+        if float(cfg.get("chosen_sft_ratio", 0.0)) != 1.0:
+            raise ValueError(f"{name}: SMPO requires chosen_sft_ratio: 1.0")
 
     if "_dpo" in name:
         if cfg.get("images_field") != "images":

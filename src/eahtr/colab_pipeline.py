@@ -11,14 +11,15 @@ if __name__ == "__main__" and not __package__:
     __package__ = "eahtr"
 
 from .candidates import (
-    BENTHAM_ICFHR2016_ZENODO_URL,
     COMPETITION_CANDIDATES,
     DIPLOMATIC_PROMPT,
     LOC_WASHINGTON_ITEM_JSON_URL,
     REVCITY_ZENODO_URL,
     CompetitionCandidateSpec,
     assign_deterministic_split,
+    assign_revcity_item_groups,
     make_sham_derangement,
+    parse_revcity_stem_id,
     resolve_vision_modules_to_save,
     should_use_4bit,
     validate_competition_candidate,
@@ -37,14 +38,15 @@ from .colab_cells_eval import (
 from .colab_cells_train import build_cell_5_train_helpers
 
 __all__ = [
-    "BENTHAM_ICFHR2016_ZENODO_URL",
     "COMPETITION_CANDIDATES",
     "CompetitionCandidateSpec",
     "DIPLOMATIC_PROMPT",
     "LOC_WASHINGTON_ITEM_JSON_URL",
     "REVCITY_ZENODO_URL",
     "assign_deterministic_split",
+    "assign_revcity_item_groups",
     "make_sham_derangement",
+    "parse_revcity_stem_id",
     "resolve_vision_modules_to_save",
     "should_use_4bit",
     "validate_competition_candidate",
