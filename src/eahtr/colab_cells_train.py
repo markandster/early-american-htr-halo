@@ -214,7 +214,8 @@ def run_candidate_arm(cand_key: str, arm: str, arm_train_rows: list[dict], val_s
         print(f'VRAM {VRAM_GB} GB: loading {cand_key} ({arm}) in 4-bit NF4 (BF16 compute + BF16 vision skip)')
         load_kwargs['quantization_config'] = BitsAndBytesConfig(
             load_in_4bit=True, bnb_4bit_quant_type='nf4', bnb_4bit_use_double_quant=True,
-            bnb_4bit_compute_dtype=torch.bfloat16, llm_int8_skip_modules=list(spec.vision_trainable_patterns),
+            bnb_4bit_compute_dtype=torch.bfloat16, bnb_4bit_quant_storage=torch.bfloat16,
+            llm_int8_skip_modules=list(spec.vision_trainable_patterns),
         )
 
     model = load_vlm_model(spec.hf_repo, load_kwargs)
@@ -251,17 +252,13 @@ def run_candidate_arm(cand_key: str, arm: str, arm_train_rows: list[dict], val_s
         raise exc
     print('Resolved trainable vision modules:', vision_modules)
     lora_targets = 'all-linear' if spec.lora_target_modules == ('all-linear',) else list(spec.lora_target_modules)
-    lora_cfg = LoraConfig(
-        r=LORA_RANK,
-        lora_alpha=LORA_ALPHA,
-        lora_dropout=LORA_DROPOUT,
-        target_modules=lora_targets,
-        exclude_modules=vision_modules,
-        modules_to_save=vision_modules,
-        bias='none',
-        task_type='CAUSAL_LM',
-    )
-    model = get_peft_model(model, lora_cfg)
+    lora_kw = {
+        'r': LORA_RANK, 'lora_alpha': LORA_ALPHA, 'lora_dropout': LORA_DROPOUT,
+        'target_modules': lora_targets, 'bias': 'none', 'task_type': 'CAUSAL_LM',
+    }
+    if not use_4bit:
+        lora_kw.update(exclude_modules=vision_modules, modules_to_save=vision_modules)
+    model = get_peft_model(model, LoraConfig(**lora_kw))
 
     vision_params, lora_params = [], []
     for pname, param in model.named_parameters():

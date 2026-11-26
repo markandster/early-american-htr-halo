@@ -95,7 +95,8 @@ def run_eval_panel(
         inputs = processor(text=[prompt], images=[image], return_tensors='pt').to(model.device)
         cap = int(max_new_tokens or MAX_EVAL_NEW_TOKENS)
         t0 = time.time()
-        out_ids = model.generate(**inputs, max_new_tokens=cap, do_sample=False)
+        with (torch.amp.autocast('cuda', dtype=torch.bfloat16) if torch.cuda.is_available() else torch.no_grad()):
+            out_ids = model.generate(**inputs, max_new_tokens=cap, do_sample=False)
         elapsed = round(time.time() - t0, 2)
         gen_ids = out_ids[:, inputs['input_ids'].shape[1]:]
         fr = 'length' if int(gen_ids.shape[1]) >= cap else 'stop'
