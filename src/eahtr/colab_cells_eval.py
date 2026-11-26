@@ -127,7 +127,7 @@ def run_eval_panel(
     return {'panel': panel_name, 'sides': len(rows), 'scores': scores, 'predictions': per_side}
 
 
-def _assert_highres_processor_config(model_dir: Path, hf_repo: str) -> None:
+def _assert_highres_processor_config(model_dir: Path, hf_repo: str, reference_dir: Path | None = None) -> None:
     family = 'gemma4' if 'gemma-4' in hf_repo.lower() else 'inkling2'
     verify_exported_vlm_dir(
         model_dir,
@@ -135,14 +135,65 @@ def _assert_highres_processor_config(model_dir: Path, hf_repo: str) -> None:
         check_gemma4_resolution=(family == 'gemma4'),
         check_nothink_template=True,
         model_family=family,
+        reference_dir=reference_dir,
     )
 
 """
 
 CELL_6_RUN_SOURCE = """
 # === Step 3: Dev Validation Only (test_public stays frozen until final eval) ===
-val_slice = val_rows[:VAL_EVAL_MAX_PAGES] if VAL_EVAL_MAX_PAGES else val_rows
-pilot_train_rows = train_rows if SHAM_MAX_PRESENTATIONS is None else train_rows[:SHAM_MAX_PRESENTATIONS]
+def _stratified_eval_slice(rows: list[dict], max_pages: int | None, seed: int) -> list[dict]:
+    if not max_pages or len(rows) <= max_pages:
+        return list(rows)
+    rng = random.Random(seed)
+    by_group = {}
+    for row in rows:
+        by_group.setdefault(row.get('document_id', ''), []).append(row)
+    gkeys = sorted(by_group, key=lambda gid: (gid.split(':', 1)[0], hashlib.sha256(f'{seed}:{gid}'.encode()).hexdigest()))
+    by_inst = {}
+    for gid in gkeys:
+        rng.shuffle(by_group[gid])
+        by_inst.setdefault(gid.split(':', 1)[0], []).append(gid)
+    picked = []
+    while len(picked) < max_pages and any(by_inst.values()):
+        for inst in sorted(by_inst):
+            if not by_inst[inst]:
+                continue
+            gid = by_inst[inst][0]
+            picked.append(by_group[gid].pop(0))
+            if not by_group[gid]:
+                by_inst[inst].pop(0)
+            if len(picked) >= max_pages:
+                break
+    return picked
+
+
+def _select_doc_disjoint_pilot(rows: list[dict], max_pages: int | None, seed: int) -> list[dict]:
+    if max_pages is None or len(rows) <= max_pages:
+        return list(rows)
+    by_group = {}
+    for r in rows:
+        by_group.setdefault(r.get('document_id', ''), []).append(r)
+    gkeys = sorted(by_group, key=lambda gid: hashlib.sha256(f'{seed}:{gid}'.encode()).hexdigest())
+    picked = []
+    for gid in gkeys:
+        if picked and len(picked) + len(by_group[gid]) > max_pages:
+            continue
+        picked.extend(by_group[gid])
+        if len(picked) >= max_pages:
+            break
+    return picked or list(rows[:max_pages])
+
+
+val_slice = _stratified_eval_slice(val_rows, VAL_EVAL_MAX_PAGES, SEED)
+if OOF_NUM_FOLDS > 1:
+    active_train_rows = [
+        r for r in train_rows
+        if (int(hashlib.sha256(str(r.get('document_id', '')).encode()).hexdigest()[:8], 16) % OOF_NUM_FOLDS) != OOF_FOLD_IDX
+    ]
+else:
+    active_train_rows = train_rows
+pilot_train_rows = _select_doc_disjoint_pilot(active_train_rows, SHAM_MAX_PRESENTATIONS, SEED)
 sham_rows = make_sham_derangement(pilot_train_rows, seed=SEED)
 dev_test_slice = test_public_rows if FINAL_FREEZE_EVAL_TEST_PUBLIC else []
 eval_slice = dev_test_slice if (FINAL_FREEZE_EVAL_TEST_PUBLIC and dev_test_slice) else val_slice
@@ -152,7 +203,7 @@ for cand_key in CANDIDATE_KEYS:
     ALL_RESULTS[cand_key] = {}
     for arm in ARMS:
         arm_rows = sham_rows if arm == 'sham_short' else (
-            pilot_train_rows if (arm == 'real' and SMOKE_TEST_MODE) else train_rows
+            pilot_train_rows if (arm == 'real' and SMOKE_TEST_MODE) else active_train_rows
         )
         ALL_RESULTS[cand_key][arm] = run_candidate_arm(cand_key, arm, arm_rows, val_slice, dev_test_slice)
 
@@ -197,12 +248,14 @@ if GENERATE_OFFLINE_GRPO_ROLLOUTS:
     adapter_dir = Path(real_res['adapter_dir']) if real_res.get('adapter_dir') else (OUTPUT_ROOT / f'{cand_key}-real' / 'adapter_best')
     assert merged_dir.is_dir() or adapter_dir.is_dir(), f'Train Stage 1 real checkpoint first under {OUTPUT_ROOT}'
 
-    processor = load_processor_fullres({'hf_repo': spec.hf_repo, 'max_pixels': spec.max_pixels, 'trust_remote_code': spec.trust_remote_code})
+    processor = load_processor_fullres({'hf_repo': spec.hf_repo, 'hf_revision': spec.hf_revision, 'max_pixels': spec.max_pixels, 'trust_remote_code': spec.trust_remote_code})
     rollout_4bit = should_use_4bit(spec, VRAM_GB, 'baseline_zeroshot')
     if rollout_4bit and spec.quant_method == 'modelopt':
         raise RuntimeError(f'{spec.hf_repo} uses {spec.quant_method} and cannot use 4-bit bitsandbytes rollouts.')
     load_target = str(merged_dir) if merged_dir.is_dir() else spec.hf_repo
     rollout_load_kwargs = {'device_map': 'auto', 'torch_dtype': torch.bfloat16, 'trust_remote_code': spec.trust_remote_code}
+    if not merged_dir.is_dir() and spec.hf_revision:
+        rollout_load_kwargs['revision'] = spec.hf_revision
     if 'gemma-4' in spec.hf_repo.lower():
         rollout_load_kwargs['attn_implementation'] = 'sdpa'
     if rollout_4bit:
@@ -218,19 +271,21 @@ if GENERATE_OFFLINE_GRPO_ROLLOUTS:
     model.eval()
 
     ROLLOUT_TEMPS = (0.3, 0.7, 0.7, 1.0)
-    trained_ids = {r['record_id'] for r in (pilot_train_rows if ('pilot_train_rows' in globals() and SMOKE_TEST_MODE) else train_rows)}
-    oof_rows = [r for r in train_rows if r['record_id'] not in trained_ids]
+    trained_rows = pilot_train_rows if ('pilot_train_rows' in globals() and SMOKE_TEST_MODE) else active_train_rows
+    trained_docs = {r['document_id'] for r in trained_rows}
+    oof_rows = [r for r in train_rows if r['document_id'] not in trained_docs]
+    fold_tag = f'fold_{OOF_FOLD_IDX}_of_{OOF_NUM_FOLDS}' if OOF_NUM_FOLDS > 1 else ('smoke_doc_oof' if oof_rows else 'in_sample_train')
     if oof_rows and ROLLOUT_SOURCE == 'oof_train':
         rollout_rows = oof_rows[:GRPO_ROLLOUT_PROMPTS]
         is_oof = True
     elif ALLOW_IN_SAMPLE_TRAIN_ROLLOUTS:
-        print('[WARN] No held-out training fold rows remain; using in-sample train rows because ALLOW_IN_SAMPLE_TRAIN_ROLLOUTS=True.')
+        print('[WARN] No document-disjoint held-out train fold rows remain; using in-sample train rows because ALLOW_IN_SAMPLE_TRAIN_ROLLOUTS=True.')
         rollout_rows = train_rows[:GRPO_ROLLOUT_PROMPTS]
         is_oof = False
     else:
         raise RuntimeError(
-            'Refusing in-sample Stage-2 rollouts without out-of-fold train rows (val/test_public stay strictly excluded); '
-            'set ALLOW_IN_SAMPLE_TRAIN_ROLLOUTS=True for smoke debugging or use out-of-fold shards with generate_halo_rollouts.py.'
+            'Refusing in-sample or same-document Stage-2 rollouts without an out-of-fold train split (val/test_public stay excluded); '
+            'set OOF_NUM_FOLDS >= 2 (or ALLOW_IN_SAMPLE_TRAIN_ROLLOUTS=True for debug) or pass held-out K-fold train shards to generate_halo_rollouts.py.'
         )
     out_jsonl = OUTPUT_ROOT / f'{cand_key}_scored_offline_grpo_rollouts.jsonl'
     pref_jsonl = OUTPUT_ROOT / f'{cand_key}_vlm_preferences.jsonl'
@@ -278,6 +333,7 @@ if GENERATE_OFFLINE_GRPO_ROLLOUTS:
                 'finish_reasons': finish_reasons,
                 'max_new_tokens_cap': cap,
                 'split': row.get('split', 'train'),
+                'source_fold': fold_tag,
                 'is_out_of_fold': is_oof,
                 'source_checkpoint': str(merged_dir if merged_dir.is_dir() else adapter_dir),
             })

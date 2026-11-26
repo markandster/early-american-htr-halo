@@ -10,10 +10,14 @@ def load_processor_fullres(spec_dict: dict):
     hf_repo = spec_dict['hf_repo']
     max_pixels = spec_dict['max_pixels']
     trust = bool(spec_dict.get('trust_remote_code', False))
+    rev = spec_dict.get('hf_revision')
+    proc_kw = {'trust_remote_code': trust}
+    if rev:
+        proc_kw['revision'] = rev
     try:
-        proc = AutoProcessor.from_pretrained(hf_repo, max_pixels=max_pixels, trust_remote_code=trust)
+        proc = AutoProcessor.from_pretrained(hf_repo, max_pixels=max_pixels, **proc_kw)
     except TypeError:
-        proc = AutoProcessor.from_pretrained(hf_repo, trust_remote_code=trust)
+        proc = AutoProcessor.from_pretrained(hf_repo, **proc_kw)
     ip = getattr(proc, 'image_processor', None)
     if ip is not None:
         if hasattr(ip, 'max_soft_tokens'):
@@ -121,9 +125,11 @@ def _build_arm_cache_key(cand_key: str, arm: str, spec, train_rows: list[dict], 
     tpl_sha = hashlib.sha256(tpl_file.read_bytes()).hexdigest()[:12] if tpl_file.is_file() else 'hub'
     prompt_sha = hashlib.sha256(DIPLOMATIC_PROMPT.encode('utf-8')).hexdigest()[:12]
     payload = {
-        'cand': cand_key, 'hf_repo': spec.hf_repo, 'arm': arm, 'smoke': SMOKE_TEST_MODE,
-        'ep': EPOCHS, 'r': LORA_RANK, 'lr': LEARNING_RATE, 'vlr': VISION_LR, 'seq': MAX_SEQ_LEN,
+        'cand': cand_key, 'hf_repo': spec.hf_repo, 'hf_rev': spec.hf_revision, 'arm': arm, 'smoke': SMOKE_TEST_MODE,
+        'ep': EPOCHS, 'r': LORA_RANK, 'alpha': LORA_ALPHA, 'drop': LORA_DROPOUT, 'wd': WEIGHT_DECAY,
+        'warmup': WARMUP_RATIO, 'lr': LEARNING_RATE, 'vlr': VISION_LR, 'ga': GRAD_ACCUM_STEPS, 'seq': MAX_SEQ_LEN,
         'max_new': MAX_EVAL_NEW_TOKENS, 'seed': SEED, 'freeze_eval': FINAL_FREEZE_EVAL_TEST_PUBLIC,
+        'oof': [globals().get('OOF_NUM_FOLDS', 1), globals().get('OOF_FOLD_IDX', 0)],
         'use_4bit': use_4bit, 'git_sha': globals().get('REPO_GIT_SHA', 'unknown'), 'tpl': tpl_sha, 'prompt': prompt_sha,
         'train_sig': [[r.get('record_id', ''), r.get('image_sha256', ''), hashlib.sha256(r.get('text', '').encode()).hexdigest()[:12], r.get('sham_donor_record_id', '')] for r in train_rows],
         'eval_sig': [[r.get('record_id', ''), r.get('image_sha256', ''), hashlib.sha256(r.get('text', '').encode()).hexdigest()[:12]] for r in eval_rows],
@@ -142,16 +148,25 @@ def run_candidate_arm(cand_key: str, arm: str, arm_train_rows: list[dict], val_s
     out_dir.mkdir(parents=True, exist_ok=True); run_dir.mkdir(parents=True, exist_ok=True)
     score_file = out_dir / f'{eval_split_name}_eval_scores_{cache_key}.json'
     if score_file.is_file():
+        cached = json.loads(score_file.read_text(encoding='utf-8'))
+        m_dir = cached.get('merged_hf_dir')
+        if m_dir and not Path(m_dir).is_dir():
+            print(f'[WARN] Cached merged_hf_dir missing on disk ({m_dir}); clearing stale reference.')
+            cached['merged_hf_dir'] = None
+        if cached.get('adapter_dir') and not Path(cached['adapter_dir']).is_dir():
+            print(f'[WARN] Cached adapter_dir missing on disk: {cached["adapter_dir"]}')
         print(f'[SKIP] Cache hit {cand_key}-{arm} ({cache_key}): {score_file}')
-        return json.loads(score_file.read_text(encoding='utf-8'))
+        return cached
 
-    print(f'\\n================ {cand_key} ({spec.hf_repo}) | ARM={arm} | EVAL={eval_split_name} ================')
-    processor = load_processor_fullres({'hf_repo': spec.hf_repo, 'max_pixels': spec.max_pixels, 'trust_remote_code': spec.trust_remote_code})
+    print(f'\\n================ {cand_key} ({spec.hf_repo}@{spec.hf_revision}) | ARM={arm} | EVAL={eval_split_name} ================')
+    processor = load_processor_fullres({'hf_repo': spec.hf_repo, 'hf_revision': spec.hf_revision, 'max_pixels': spec.max_pixels, 'trust_remote_code': spec.trust_remote_code})
 
     if use_4bit and spec.quant_method == 'modelopt':
         raise RuntimeError(f'Candidate {spec.hf_repo} uses {spec.quant_method} quantization; cannot use 4-bit NF4 QLoRA.')
 
     load_kwargs = {'device_map': 'auto', 'torch_dtype': torch.bfloat16, 'trust_remote_code': spec.trust_remote_code}
+    if spec.hf_revision:
+        load_kwargs['revision'] = spec.hf_revision
     if 'gemma-4' in spec.hf_repo.lower():
         load_kwargs['attn_implementation'] = 'sdpa'
     if use_4bit:
@@ -371,7 +386,7 @@ def run_candidate_arm(cand_key: str, arm: str, arm_train_rows: list[dict], val_s
             merged_model.save_pretrained(merged_dir, safe_serialization=True)
             processor.save_pretrained(merged_dir)
             del merged_model
-            _assert_highres_processor_config(merged_dir, spec.hf_repo)
+            _assert_highres_processor_config(merged_dir, spec.hf_repo, reference_dir=run_dir / 'adapter_best')
             payload['merged_hf_dir'] = str(merged_dir)
         else:
             del model, optimizer, scheduler; gc.collect(); torch.cuda.empty_cache()
@@ -382,12 +397,15 @@ def run_candidate_arm(cand_key: str, arm: str, arm_train_rows: list[dict], val_s
             if host_ram_gb is not None and spec.params_b * 3.0 > host_ram_gb:
                 print(f'[SKIP MERGE] Host RAM {host_ram_gb:.1f} GB < ~{spec.params_b * 3.0:.0f} GB needed; adapter saved at {run_dir / "adapter_best"}.')
             else:
-                cpu_base = load_vlm_model(spec.hf_repo, {'device_map': 'cpu', 'torch_dtype': torch.bfloat16, 'trust_remote_code': spec.trust_remote_code})
+                cpu_kw = {'device_map': 'cpu', 'torch_dtype': torch.bfloat16, 'trust_remote_code': spec.trust_remote_code}
+                if spec.hf_revision:
+                    cpu_kw['revision'] = spec.hf_revision
+                cpu_base = load_vlm_model(spec.hf_repo, cpu_kw)
                 merged_model = PeftModel.from_pretrained(cpu_base, str(run_dir / 'adapter_best')).merge_and_unload()
                 merged_model.save_pretrained(merged_dir, safe_serialization=True)
                 processor.save_pretrained(merged_dir)
                 del merged_model, cpu_base
-                _assert_highres_processor_config(merged_dir, spec.hf_repo)
+                _assert_highres_processor_config(merged_dir, spec.hf_repo, reference_dir=run_dir / 'adapter_best')
                 payload['merged_hf_dir'] = str(merged_dir)
             model = optimizer = scheduler = None
         score_file.write_text(json.dumps(payload, indent=2), encoding='utf-8')

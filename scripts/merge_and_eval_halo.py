@@ -46,6 +46,29 @@ def main() -> int:
     if has_test_split and not args.allow_frozen_test:
         print("Refusing test manifest without --allow-frozen-test during dev. Use val.jsonl.", file=sys.stderr)
         return 2
+    eval_ids_list = [r.get("record_id") for r in rows]
+    if len(eval_ids_list) != len(set(eval_ids_list)):
+        print(f"Duplicate record_id entries found in {args.eval_jsonl}", file=sys.stderr)
+        return 2
+
+    base_map: dict[str, float] | None = None
+    if args.baseline_predictions is not None:
+        if not args.baseline_predictions.is_file():
+            print(f"Baseline predictions file not found: {args.baseline_predictions}", file=sys.stderr)
+            return 2
+        base_data = json.loads(args.baseline_predictions.read_text(encoding="utf-8"))
+        base_rows = base_data if isinstance(base_data, list) else base_data.get("predictions", [])
+        base_ids_list = [r.get("record_id") for r in base_rows]
+        if len(base_ids_list) != len(set(base_ids_list)):
+            print(f"Duplicate record_id entries found in {args.baseline_predictions}", file=sys.stderr)
+            return 2
+        if set(base_ids_list) != set(eval_ids_list):
+            print(
+                f"Baseline predictions must match eval record_ids 1-to-1 (base={len(base_ids_list)}, eval={len(eval_ids_list)})",
+                file=sys.stderr,
+            )
+            return 2
+        base_map = {r["record_id"]: float(r["strict_cer"]) for r in base_rows}
 
     if args.adapter_dir is not None:
         merge_script = args.halo_repo / "scripts" / "after_training" / "merge_peft_adapters.py"
@@ -131,18 +154,7 @@ def main() -> int:
     }
     if args.dual_convention and raw_cc:
         scores["raw_strict_cer_pct"] = round(100.0 * raw_ce / raw_cc, 2)
-    if args.baseline_predictions and args.baseline_predictions.is_file():
-        base_data = json.loads(args.baseline_predictions.read_text(encoding="utf-8"))
-        base_rows = base_data if isinstance(base_data, list) else base_data.get("predictions", [])
-        base_map = {r["record_id"]: r["strict_cer"] for r in base_rows}
-        eval_ids = {p["record_id"] for p in preds}
-        missing_ids = sorted(eval_ids - set(base_map))
-        if missing_ids or len(base_map) != len(eval_ids):
-            print(
-                f"Baseline predictions must match eval record_ids 1-to-1 (missing={len(missing_ids)}, base={len(base_map)}, eval={len(eval_ids)})",
-                file=sys.stderr,
-            )
-            return 2
+    if base_map is not None:
         diffs = [p["strict_cer"] - base_map[p["record_id"]] for p in preds]
         cids = [p["document_id"] for p in preds]
         wts = [max(1, int(p["ref_chars"])) for p in preds]

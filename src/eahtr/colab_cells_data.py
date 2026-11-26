@@ -4,6 +4,13 @@ from __future__ import annotations
 
 from .colab_cells_corpus import build_cell_4_corpus
 
+__all__ = [
+    "build_cell_1_markdown",
+    "build_cell_2_setup",
+    "build_cell_3_config",
+    "build_cell_4_corpus",
+]
+
 CELL_1_MD_SOURCE = """
 # Early American HTR — Public Competition Training & Eval (Colab Pro)
 
@@ -155,9 +162,11 @@ SHAM_MAX_PRESENTATIONS = 128 if SMOKE_TEST_MODE else None
 # Public rights-cleared datasets (CC-BY-4.0 / Public Domain ONLY)
 INCLUDE_REVCITY = True
 REVCITY_MAX_PAGES = 400 if SMOKE_TEST_MODE else None
-VAL_FRACTION = 0.10
-TEST_FRACTION = 0.10
+VAL_FRACTION = 0.05
+TEST_FRACTION = 0.05
 MAX_EVAL_GROUP_PAGES = 40
+OOF_NUM_FOLDS = 1
+OOF_FOLD_IDX = 0
 PORTAL_CREATOR_MAP_PATH = ''  # Optional JSON mapping revcity stem/item IDs to creator/hand IDs
 
 # Optional Public Domain LOC By the People (LCCN 2020446971) challenge eval

@@ -33,11 +33,11 @@ def main() -> int:
     from transformers import AutoModelForImageTextToText, AutoProcessor
 
     rows = [json.loads(line) for line in args.train_jsonl.read_text(encoding="utf-8").splitlines() if line.strip()]
-    has_eval_rows = any(str(r.get("split", "")).lower() in ("val", "validation", "test", "test_public") for r in rows)
-    has_eval_name = any(tok in args.train_jsonl.name.lower() for tok in ("val", "test"))
-    if (has_eval_rows or has_eval_name) and not args.allow_eval_split:
+    has_non_train = any(str(r.get("split") or "").strip().lower() != "train" for r in rows)
+    has_forbidden_name = any(tok in args.train_jsonl.name.lower() for tok in ("val", "test", "hard_case"))
+    if (has_non_train or has_forbidden_name) and not args.allow_eval_split:
         print(
-            f"Refusing eval/test manifest {args.train_jsonl} for Stage-2 rollout generation (prevents eval leakage); pass out-of-fold train shards or --allow-eval-split.",
+            f"Refusing non-train or eval/hard_case manifest {args.train_jsonl} for Stage-2 rollout generation; pass out-of-fold split='train' shards or --allow-eval-split.",
             file=sys.stderr,
         )
         return 2

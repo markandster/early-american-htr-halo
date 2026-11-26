@@ -349,8 +349,6 @@ def verify_halo_run_log_finite_loss(log_path: Path, *, min_steps: int = 1) -> li
             parsed[raw_key.lower()] = val
         primary = parsed.get("loss")
         if primary is None:
-            primary = parsed.get("train_loss")
-        if primary is None:
             continue
         step_m = _STEP_KV_RE.search(line)
         if step_m:

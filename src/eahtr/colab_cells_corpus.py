@@ -57,9 +57,12 @@ def download_with_retry(
                         pbar.update(len(chunk))
             part.replace(dest)
             if expected_bytes is not None and dest.stat().st_size != expected_bytes:
-                raise RuntimeError(f'Download byte count mismatch for {dest}: {dest.stat().st_size} != {expected_bytes}')
+                actual = dest.stat().st_size
+                dest.unlink(missing_ok=True)
+                raise OSError(f'Download byte count mismatch for {dest}: {actual} != {expected_bytes}')
             if expected_md5 is not None and _file_md5(dest) != expected_md5:
-                raise RuntimeError(f'Download MD5 mismatch for {dest}')
+                dest.unlink(missing_ok=True)
+                raise OSError(f'Download MD5 mismatch for {dest}')
             return
         except (HTTPError, URLError, OSError, TimeoutError) as exc:
             last_err = exc
@@ -171,15 +174,16 @@ if INCLUDE_REVCITY:
                 hc_img = rc_pages / f'hard_{safe_id}{img_ext}'
                 if not hc_img.exists():
                     hc_img.write_bytes(zf.read(entry['img']))
-                is_blank = (len(cleaned_text.strip()) == 0 and len(raw_text.strip()) == 0)
+                has_empty_alto = (len(raw_text.strip()) == 0)
+                gt_status = 'missing_or_unverified_gt' if has_empty_alto else ('empty_after_hygiene' if not cleaned_text.strip() else 'nonblank')
                 hard_case_rows.append({
                     'record_id': f'revcity-{safe_id}',
                     'document_id': info.get('document_id') or f'revcity:{safe_id}',
                     'writer_key': info.get('writer_key') or f'unattributed_item:{safe_id}',
                     'image_path': str(hc_img),
                     'reason': drop_tag,
-                    'is_blank_page': is_blank,
-                    'ground_truth_status': 'blank_page' if is_blank else ('empty_after_hygiene' if not cleaned_text.strip() else 'nonblank'),
+                    'has_empty_alto_text': has_empty_alto,
+                    'ground_truth_status': gt_status,
                     'raw_text': raw_text,
                     'text': cleaned_text or raw_text,
                 })
@@ -341,11 +345,24 @@ assert test_audit['passed'], f'Train/Test leakage detected: {test_audit}'
 assert val_test_audit['passed'], f'Val/Test leakage detected: {val_test_audit}'
 
 train_doc_ids = {r['document_id'] for r in train_rows}
+val_doc_ids = {r['document_id'] for r in val_rows}
+test_doc_ids = {r['document_id'] for r in test_public_rows}
 hard_case_held_out = []
 for hc in hard_case_rows:
-    in_train = hc.get('document_id') in train_doc_ids
-    hc['panel_role'] = 'diagnostic_overlaps_train' if in_train else 'held_out_from_train'
-    if not in_train:
+    did = hc.get('document_id')
+    if did in test_doc_ids:
+        hc['split_overlap'] = 'test_public'
+        hc['panel_role'] = 'diagnostic_overlaps_test'
+    elif did in train_doc_ids:
+        hc['split_overlap'] = 'train'
+        hc['panel_role'] = 'diagnostic_overlaps_train'
+    elif did in val_doc_ids:
+        hc['split_overlap'] = 'val'
+        hc['panel_role'] = 'held_out_from_train_val_doc'
+        hard_case_held_out.append(hc)
+    else:
+        hc['split_overlap'] = 'none'
+        hc['panel_role'] = 'held_out_from_train_and_test'
         hard_case_held_out.append(hc)
 
 manifest_dir = OUTPUT_ROOT / 'manifests'

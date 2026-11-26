@@ -148,9 +148,14 @@ def export_halo_vlm_preference_dataset(
                 dropped += 1
         return kept, dropped
 
-    def _pair_audit_rows(pairs: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _pair_audit_rows(pairs: Sequence[dict[str, Any]], *, forbid_eval_splits: bool = False) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         for idx, row in enumerate(pairs):
+            split_val = str(row.get("split") or "").strip().lower()
+            if forbid_eval_splits and split_val in {"val", "validation", "test", "test_public"}:
+                raise ValueError(
+                    f"Refusing eval/test split row ({split_val!r}) inside Stage-2 preference train_pairs"
+                )
             imgs = row.get("images") or ([row["image_path"]] if row.get("image_path") else [])
             rows.append(
                 {
@@ -165,7 +170,7 @@ def export_halo_vlm_preference_dataset(
             )
         return rows
 
-    train_audit_rows = _pair_audit_rows(train_pairs)
+    train_audit_rows = _pair_audit_rows(train_pairs, forbid_eval_splits=True)
     test_audit_rows = _pair_audit_rows(test_pairs)
     audit = audit_split_disjointness(train_audit_rows, test_audit_rows)
     path_collisions = sorted(
@@ -313,5 +318,37 @@ def verify_exported_vlm_dir(
         ):
             raise ValueError(f"{model_dir}: tokenized chat template diverged from {reference_dir}")
         checked_fields["reference_token_parity"] = True
+
+        tf_mod = __import__("transformers")
+        auto_proc_cls = getattr(tf_mod, "AutoProcessor", None)
+        if auto_proc_cls is not None and (model_dir / "processor_config.json").is_file() and (reference_dir / "processor_config.json").is_file():
+            try:
+                from PIL import Image
+            except ImportError:
+                Image = None  # type: ignore[assignment]
+            if Image is not None and hasattr(Image, "new"):
+                ref_proc = auto_proc_cls.from_pretrained(str(reference_dir))
+                exp_proc = auto_proc_cls.from_pretrained(str(model_dir))
+                probe_img = Image.new("RGB", (16, 16), (255, 255, 255))
+                ref_p = ref_proc.apply_chat_template(sample, tokenize=False, add_generation_prompt=True)
+                exp_p = exp_proc.apply_chat_template(sample, tokenize=False, add_generation_prompt=True)
+                ref_enc = ref_proc(text=[ref_p], images=[probe_img], return_tensors="pt")
+                exp_enc = exp_proc(text=[exp_p], images=[probe_img], return_tensors="pt")
+                if list(ref_enc["input_ids"][0]) != list(exp_enc["input_ids"][0]):
+                    raise ValueError(f"{model_dir}: multimodal AutoProcessor input_ids diverged from {reference_dir}")
+                if "pixel_values" in ref_enc and "pixel_values" in exp_enc:
+                    def _flat(v: Any) -> list[float]:
+                        if hasattr(v, "flatten"):
+                            return [float(x) for x in v.flatten().tolist()]
+                        if isinstance(v, (list, tuple)):
+                            out: list[float] = []
+                            for item in v:
+                                out.extend(_flat(item))
+                            return out
+                        return [float(v)]
+                    r_flat, e_flat = _flat(ref_enc["pixel_values"]), _flat(exp_enc["pixel_values"])
+                    if len(r_flat) != len(e_flat) or any(abs(a - b) > 1e-4 for a, b in zip(r_flat, e_flat)):
+                        raise ValueError(f"{model_dir}: image processor pixel_values diverged from {reference_dir}")
+                checked_fields["reference_image_parity"] = True
 
     return checked_fields

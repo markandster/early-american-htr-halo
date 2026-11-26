@@ -7,7 +7,6 @@ and all candidate base models are Apache-2.0.
 from __future__ import annotations
 
 import hashlib
-import json
 import random
 import re
 from dataclasses import dataclass
@@ -44,6 +43,7 @@ class CompetitionCandidateSpec:
     min_bf16_vram_gb: float
     trust_remote_code: bool = False
     quant_method: str | None = None
+    hf_revision: str | None = None
 
 
 COMPETITION_CANDIDATES: dict[str, CompetitionCandidateSpec] = {
@@ -67,6 +67,7 @@ COMPETITION_CANDIDATES: dict[str, CompetitionCandidateSpec] = {
         est_mlx_peak_gb=12.5,
         min_bf16_vram_gb=56.0,
         trust_remote_code=False,
+        hf_revision="43c9d014b231",
     ),
 }
 

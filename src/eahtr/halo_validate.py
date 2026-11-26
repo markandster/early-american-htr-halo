@@ -1,6 +1,6 @@
 """Two-tier configuration validator for White Circle Halo recipes.
 
-Tier 1 validates YAML 1.2 boolean safety, VLM/EP constraints, and SMPO/DPO/SFT keys
+Tier 1 validates YAML 1.2 boolean safety, VLM/EP constraints, and SMPO/SFT/GRPO keys
 without external dependencies. Tier 2 imports an external whitecircle/halo checkout via
 ``--halo-repo`` (preserving LicenseRef-Halo clean-room separation) inside Python 3.12.
 """
@@ -120,15 +120,6 @@ def _validate_single_tier1(yaml_path: Path, repo_root: Path) -> dict[str, Any]:
         if float(cfg.get("chosen_sft_ratio", 0.0)) != 1.0:
             raise ValueError(f"{name}: SMPO requires chosen_sft_ratio: 1.0")
 
-    if "_dpo" in name:
-        if cfg.get("images_field") != "images":
-            raise ValueError(f"{name}: VLM DPO must set images_field: images")
-        if cfg.get("precompute_ref_log_probs") is True:
-            raise ValueError(f"{name}: VLM DPO refuses precompute_ref_log_probs: true")
-        for forbidden_dpo_key in ("generation_max_prompt_length", "max_prompt_length"):
-            if forbidden_dpo_key in cfg:
-                raise ValueError(f"{name}: Halo DPO refuses {forbidden_dpo_key}")
-
     if name == "archival_grpo_online.yaml":
         if "gradient_checkpointing_kwargs" in cfg and cfg.get("gradient_checkpointing") is not True:
             raise ValueError(f"{name}: gradient_checkpointing_kwargs requires gradient_checkpointing: true")
@@ -156,8 +147,6 @@ def _trainer_spec_for_config(name: str) -> str:
         return "sft"
     if "_vlm_smpo" in name or name.endswith("_smpo.yaml"):
         return "smpo"
-    if "_vlm_dpo" in name or name.endswith("_dpo.yaml"):
-        return "dpo"
     if "offline_grpo" in name or "_grpo_offline" in name:
         return "grpo_offline"
     if "_grpo_online" in name:
@@ -307,7 +296,6 @@ def _resolve_halo_imports() -> dict[str, Any]:
     cpu_traits: dict[str, tuple[str, str, tuple[bool, str | None, bool, int, bool]]] = {
         "DistributedSFTTrainer": ("halo.trainers.sft", "DistributedSFTTrainer", (True, None, True, 1, False)),
         "SMPOTrainer": ("halo.trainers.preference.smpo", "SMPOTrainer", (True, None, False, 2, False)),
-        "DistributedDPOTrainer": ("halo.trainers.preference.dpo", "DistributedDPOTrainer", (False, None, False, 2, False)),
         "OfflineGRPOTrainer": ("halo.trainers.grpo.offline.trainer", "OfflineGRPOTrainer", (True, None, False, 1, False)),
         "DistributedOnlineGRPOTrainer": ("halo.trainers.grpo.online", "DistributedOnlineGRPOTrainer", (False, _pp_online, False, 1, True)),
     }
@@ -342,8 +330,6 @@ def _resolve_halo_imports() -> dict[str, Any]:
         "SFTConfig": trl.SFTConfig,
         "SMPOScriptArguments": pref_cfg_mod.SMPOScriptArguments,
         "SMPOConfig": pref_cfg_mod.SMPOConfig,
-        "DPOScriptArguments": pref_cfg_mod.DPOScriptArguments,
-        "DPOConfig": trl.DPOConfig,
         "OfflineGRPOScriptArguments": grpo_off_mod.OfflineGRPOScriptArguments,
         "OfflineGRPOConfig": grpo_off_mod.OfflineGRPOConfig,
         "OnlineGRPOScriptArguments": grpo_on_mod.OnlineGRPOScriptArguments,
@@ -389,7 +375,6 @@ def validate_yaml_configs_tier2(
         families = {
             "sft": ((h["SFTScriptArguments"], h["SFTConfig"], h["ModelArguments"], h["ParallelismArguments"]), h["DistributedSFTTrainer"]),
             "smpo": ((h["SMPOScriptArguments"], h["SMPOConfig"], h["ModelArguments"], h["ParallelismArguments"]), h["SMPOTrainer"]),
-            "dpo": ((h["DPOScriptArguments"], h["DPOConfig"], h["ModelArguments"], h["ParallelismArguments"]), h["DistributedDPOTrainer"]),
             "grpo_offline": ((h["OfflineGRPOScriptArguments"], h["OfflineGRPOConfig"], h["ModelArguments"], h["ParallelismArguments"]), h["OfflineGRPOTrainer"]),
             "grpo_online": ((h["OnlineGRPOScriptArguments"], h["GRPOConfig"], h["ModelArguments"], h["ParallelismArguments"]), h["DistributedOnlineGRPOTrainer"]),
         }

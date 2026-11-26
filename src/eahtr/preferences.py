@@ -147,8 +147,18 @@ def build_preference_pairs(
             "max_new_tokens_cap": cap_val,
             "rejected_tokens": rej_toks,
         }
-        for prov_key in ("document_id", "writer_key", "image_sha256", "image_dhash", "split", "source_checkpoint"):
+        for prov_key in (
+            "document_id",
+            "writer_key",
+            "image_sha256",
+            "image_dhash",
+            "split",
+            "source_fold",
+            "source_checkpoint",
+        ):
             if rec.get(prov_key) is not None and str(rec.get(prov_key)).strip():
                 pair[prov_key] = rec[prov_key]
+        if "is_out_of_fold" in rec:
+            pair["is_out_of_fold"] = bool(rec["is_out_of_fold"])
         pairs.append(pair)
     return pairs

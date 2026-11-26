@@ -37,6 +37,7 @@ from eahtr.colab_pipeline import (
 
 def test_all_competition_candidates_pass_policy() -> None:
     assert set(COMPETITION_CANDIDATES) == {"gemma4_12b"}
+    assert COMPETITION_CANDIDATES["gemma4_12b"].hf_revision == "43c9d014b231"
     assert "vision_tower" in COMPETITION_CANDIDATES["gemma4_12b"].vision_trainable_patterns
     assert COMPETITION_CANDIDATES["gemma4_12b"].lora_target_modules == ("all-linear",)
     for spec in COMPETITION_CANDIDATES.values():
@@ -202,6 +203,12 @@ def test_generated_notebook_valid_json_ast_and_public_only(tmp_path: Path) -> No
         "PINNED_REPO_COMMIT",
         "is_out_of_fold",
         "image_dhash",
+        "hf_revision",
+        "_stratified_eval_slice",
+        "OOF_NUM_FOLDS",
+        "has_empty_alto_text",
+        "missing_or_unverified_gt",
+        "_select_doc_disjoint_pilot",
     )
     for marker in expected_markers:
         assert marker in raw_text, f"Missing expected notebook marker: {marker}"
