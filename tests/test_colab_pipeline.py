@@ -4,8 +4,21 @@ import ast
 import json
 from pathlib import Path
 
+from jinja2 import Environment
+from jinja2.ext import Extension
 import pytest
 import yaml
+
+
+class _GenerationTagExtension(Extension):
+    """Minimal passthrough for HF `{% generation %}...{% endgeneration %}` Jinja blocks."""
+
+    tags = {"generation"}
+
+    def parse(self, parser):  # type: ignore[override]
+        next(parser.stream)
+        body = parser.parse_statements(["name:endgeneration"], drop_needle=True)
+        return body
 
 from eahtr.colab_pipeline import (
     COMPETITION_CANDIDATES,
@@ -25,6 +38,10 @@ def test_all_competition_candidates_pass_policy() -> None:
         "inkling2_mini",
         "qwen36_35b_a3b",
     }
+    assert "vision_tower" in COMPETITION_CANDIDATES["gemma4_12b"].vision_trainable_patterns
+    assert COMPETITION_CANDIDATES["gemma4_12b"].lora_target_modules == ("all-linear",)
+    assert COMPETITION_CANDIDATES["gemma4_26b_a4b"].lora_target_modules == ("all-linear",)
+    assert COMPETITION_CANDIDATES["inkling2_mini"].quant_method == "modelopt"
     assert "r_proj" in COMPETITION_CANDIDATES["inkling2_mini"].lora_target_modules
     for spec in COMPETITION_CANDIDATES.values():
         validate_competition_candidate(spec)
@@ -114,13 +131,38 @@ def test_should_use_4bit_across_gpus_and_arms() -> None:
 def test_generated_notebook_valid_json_ast_and_public_only(tmp_path: Path) -> None:
     nb_path = write_competition_colab_notebook(tmp_path / "test_colab.ipynb")
     raw_text = nb_path.read_text(encoding="utf-8")
-    assert "SMOKE_TEST_MODE" in raw_text
-    assert "AutoModelForMultimodalLM" in raw_text
-    assert "userdata" in raw_text
-    assert "should_use_4bit" in raw_text
-    assert "PUBLISH_TO_HF_DATASET" in raw_text
-    assert "INCLUDE_BENTHAM" in raw_text
-    assert "parse_page_xml_lines" in raw_text
+    expected_markers = (
+        "SMOKE_TEST_MODE",
+        "AutoModelForMultimodalLM",
+        "userdata",
+        "should_use_4bit",
+        "PUBLISH_TO_HF_DATASET",
+        "INCLUDE_BENTHAM",
+        "parse_page_xml_lines",
+        "USE_GOOGLE_DRIVE",
+        "llm_int8_skip_modules",
+        "gradient_checkpointing_kwargs",
+        "use_reentrant",
+        "max_soft_tokens = 1120",
+        "image_seq_length = 1120",
+        "attn_implementation",
+        "MAX_SEQ_LEN = 4096",
+        "torch.equal",
+        "_resolve_turn_terminator",
+        "has_live_vision_grad",
+        "accum_count",
+        "thinking_leak_pages",
+        "enable_thinking=False",
+        "val_test_audit",
+        "python -m mlx_vlm convert",
+        "build_preference_pairs",
+        "ROLLOUT_TEMPS",
+        "exclude_modules=vision_modules",
+        "modelopt",
+    )
+    for marker in expected_markers:
+        assert marker in raw_text, f"Missing expected notebook marker: {marker}"
+    assert "upgrade transformers peft accelerate bitsandbytes rapidfuzz pyyaml pillow" not in raw_text
 
     nb = json.loads(raw_text)
     assert nb["nbformat"] == 4
@@ -134,12 +176,17 @@ def test_generated_notebook_valid_json_ast_and_public_only(tmp_path: Path) -> No
 
 
 def test_halo_yaml_configs_match_schema_and_ink2_rules() -> None:
-    config_dir = Path(__file__).resolve().parents[1] / "configs" / "halo"
+    repo_root = Path(__file__).resolve().parents[1]
+    config_dir = repo_root / "configs" / "halo"
     expected_files = {
         "gemma4_12b_sft.yaml",
         "gemma4_26b_a4b_sft.yaml",
+        "gemma4_12b_vlm_smpo.yaml",
+        "gemma4_26b_a4b_vlm_smpo.yaml",
+        "gemma4_12b_vlm_dpo.yaml",
         "inkling2_mini_sft.yaml",
         "inkling2_small_sft.yaml",
+        "inkling2_small_vlm_smpo.yaml",
         "archival_grpo_offline.yaml",
         "inkling2_offline_grpo.yaml",
         "archival_grpo_online.yaml",
@@ -148,22 +195,91 @@ def test_halo_yaml_configs_match_schema_and_ink2_rules() -> None:
     assert {p.name for p in yaml_files} == expected_files
 
     refused_keys = {"assistant_only_loss", "completion_only_loss", "max_pixels", "warmup_ratio"}
-    loaded = {}
+    loaded: dict[str, dict] = {}
     for p in yaml_files:
         cfg = yaml.safe_load(p.read_text(encoding="utf-8"))
         assert isinstance(cfg, dict)
         assert not (refused_keys & set(cfg)), f"{p.name} contains Halo startup-refused keys"
+        assert cfg.get("bf16") is True, f"{p.name} must pin bf16: true"
+        assert "test_size" not in cfg, f"{p.name} must omit test_size on pre-split data"
+        if cfg.get("expert_parallel_size", 1) > 1 and cfg.get("use_peft"):
+            assert cfg.get("lora_target_modules") != "all-linear", (
+                f"{p.name} must not use all-linear under EP > 1"
+            )
+        if "chat_template" in cfg:
+            tpl_path = repo_root / str(cfg["chat_template"])
+            assert tpl_path.is_file(), f"{p.name} references missing template {tpl_path}"
         loaded[p.name] = cfg
 
-    for name in ("gemma4_12b_sft.yaml", "gemma4_26b_a4b_sft.yaml"):
+    for name in ("gemma4_12b_sft.yaml", "gemma4_12b_vlm_smpo.yaml", "gemma4_12b_vlm_dpo.yaml"):
         assert loaded[name]["attn_implementation"] == "sdpa"
         assert loaded[name]["lora_target_modules"] == "all-linear"
-        assert loaded[name]["train_on_completions_only"] is True
+        assert loaded[name]["force_chat_template"] is True
+    for name in ("gemma4_26b_a4b_sft.yaml", "gemma4_26b_a4b_vlm_smpo.yaml"):
+        assert loaded[name]["attn_implementation"] == "sdpa"
+        assert loaded[name]["expert_parallel_size"] == 8
+        assert loaded[name]["lora_r"] % 8 == 0
+        assert set(loaded[name]["lora_target_modules"]) >= {
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj",
+            "gate_up_proj",
+            "down_proj",
+        }
+    for name in ("gemma4_12b_vlm_smpo.yaml", "gemma4_26b_a4b_vlm_smpo.yaml", "inkling2_small_vlm_smpo.yaml"):
+        cfg = loaded[name]
+        assert cfg["loss_type"] == "smooth_lower_bound"
+        assert cfg["use_margin_schedule"] is True
+        assert "images_field" not in cfg
+        assert "truncation_mode" not in cfg
+        assert cfg.get("freeze_vision_tower") is not True
+        assert cfg["lora_dropout"] == 0.0
+        assert float(cfg["learning_rate"]) <= 5.0e-6
 
-    for name in ("inkling2_mini_sft.yaml", "inkling2_small_sft.yaml", "inkling2_offline_grpo.yaml"):
+    dpo_cfg = loaded["gemma4_12b_vlm_dpo.yaml"]
+    assert dpo_cfg["images_field"] == "images"
+    assert dpo_cfg["loss_type"] == ["sigmoid", "sft"]
+    assert "precompute_ref_log_probs" not in dpo_cfg
+    assert "generation_max_prompt_length" not in dpo_cfg
+
+    for name in (
+        "inkling2_mini_sft.yaml",
+        "inkling2_small_sft.yaml",
+        "inkling2_small_vlm_smpo.yaml",
+        "inkling2_offline_grpo.yaml",
+    ):
         assert loaded[name]["pad_token"] == "<|endoftext|>"
 
     assert "r_proj" in loaded["inkling2_mini_sft.yaml"]["lora_target_modules"]
-    for name in ("inkling2_small_sft.yaml", "inkling2_offline_grpo.yaml"):
+    for name in ("inkling2_small_sft.yaml", "inkling2_small_vlm_smpo.yaml", "inkling2_offline_grpo.yaml"):
         assert loaded[name]["frozen_quantized_experts"] is True
+        assert loaded[name]["expert_parallel_size"] >= 2
+        assert loaded[name]["lora_r"] % 8 == 0
         assert "o_proj" in loaded[name]["lora_target_modules"]
+
+
+def test_halo_jinja_templates_satisfy_smpo_and_inference_prefix_invariant() -> None:
+    tpl_dir = Path(__file__).resolve().parents[1] / "configs" / "halo" / "templates"
+    env = Environment(extensions=[_GenerationTagExtension])
+    env.globals["raise_exception"] = lambda msg: (_ for _ in ()).throw(ValueError(msg))
+
+    prompt_msgs = [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": "Transcribe."}]}]
+    completion_msgs = [{"role": "assistant", "content": [{"type": "text", "text": "Dear Sir,"}]}]
+
+    g4_tpl = env.from_string((tpl_dir / "gemma4_htr_nothink.jinja").read_text(encoding="utf-8"))
+    g4_prompt_closed = g4_tpl.render(messages=prompt_msgs, bos_token="<bos>", add_generation_prompt=False)
+    g4_prompt_open = g4_tpl.render(messages=prompt_msgs, bos_token="<bos>", add_generation_prompt=True)
+    g4_full = g4_tpl.render(messages=prompt_msgs + completion_msgs, bos_token="<bos>", add_generation_prompt=False)
+    assert g4_full.startswith(g4_prompt_closed)
+    assert g4_full.startswith(g4_prompt_open)
+    assert "<|turn>model\n<|channel>thought\n<channel|>" in g4_prompt_open
+
+    ink_tpl = env.from_string((tpl_dir / "inkling2_htr_nothink.jinja").read_text(encoding="utf-8"))
+    ink_prompt_closed = ink_tpl.render(messages=prompt_msgs, add_generation_prompt=False)
+    ink_prompt_open = ink_tpl.render(messages=prompt_msgs, add_generation_prompt=True)
+    ink_full = ink_tpl.render(messages=prompt_msgs + completion_msgs, add_generation_prompt=False)
+    assert ink_full.startswith(ink_prompt_closed)
+    assert ink_full.startswith(ink_prompt_open)
+    assert "Thinking effort level: 0<" in ink_prompt_open
+    assert "Thinking effort level: 0.9" not in ink_prompt_open

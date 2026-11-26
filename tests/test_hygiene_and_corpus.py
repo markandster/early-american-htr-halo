@@ -1,5 +1,7 @@
 """Unit tests for diplomatic hygiene, license allowlist, ALTO-XML, and split auditing."""
 
+import xml.etree.ElementTree as ET
+
 import pytest
 
 from eahtr.corpus import (
@@ -73,10 +75,16 @@ def test_parse_page_xml_lines_extracts_ordered_text() -> None:
         <TextRegion id="r1">
           <TextLine id="l1">
             <Coords points="0,0 100,0 100,20 0,20"/>
+            <Word id="w1"><TextEquiv><Unicode>Mr.</Unicode></TextEquiv></Word>
+            <Word id="w2"><TextEquiv><Unicode>Bentham</Unicode></TextEquiv></Word>
             <TextEquiv><Unicode>Mr. Bentham observes</Unicode></TextEquiv>
           </TextLine>
           <TextLine id="l2">
-            <TextEquiv><Unicode>that Public Utility is supreme.</Unicode></TextEquiv>
+            <Word id="w3"><TextEquiv><Unicode>that</Unicode></TextEquiv></Word>
+            <Word id="w4"><TextEquiv><Unicode>Public Utility</Unicode></TextEquiv></Word>
+          </TextLine>
+          <TextLine id="l3">
+            <TextEquiv><Unicode>   </Unicode></TextEquiv>
           </TextLine>
         </TextRegion>
       </Page>
@@ -84,8 +92,11 @@ def test_parse_page_xml_lines_extracts_ordered_text() -> None:
     """
     assert parse_page_xml_lines(page_xml) == [
         "Mr. Bentham observes",
-        "that Public Utility is supreme.",
+        "that Public Utility",
     ]
+    assert parse_page_xml_lines("<PcGts><Page><TextRegion><TextLine><TextEquiv><Unicode></Unicode></TextEquiv></TextLine></TextRegion></Page></PcGts>") == []
+    with pytest.raises(ET.ParseError):
+        parse_page_xml_lines("<PcGts><unclosed>")
 
 
 def test_filter_corpus_record_gates() -> None:
@@ -150,3 +161,14 @@ def test_audit_split_disjointness_catches_all_leak_vectors() -> None:
     assert report["writer_collisions"] == ["writer-a"]
     assert report["image_collisions"] == ["aaa111"]
     assert report["ngram_collisions"] > 0
+    assert report["exact_text_collisions"] == 1
+
+    short_dup_train = [
+        {"document_id": "d-short-1", "writer_key": "w-short-1", "image_sha256": "s1", "text": "Boston July 6 1776 Your humble servant Sir"},
+    ]
+    short_dup_eval = [
+        {"document_id": "d-short-2", "writer_key": "w-short-2", "image_sha256": "s2", "text": "boston   july 6 1776 your humble servant sir"},
+    ]
+    short_report = audit_split_disjointness(short_dup_train, short_dup_eval, ngram_size=32)
+    assert short_report["passed"] is False
+    assert short_report["exact_text_collisions"] == 1

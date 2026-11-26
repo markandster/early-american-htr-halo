@@ -1,0 +1,73 @@
+# Halo VLM SMPO — Inkling-2-Small (frozen NVFP4/MXFP8 experts, EP=8 default Stage 2 Preference).
+# Default EP=8 fits ~60-65 GiB/GPU; override --expert_parallel_size=4 (4x B200) or 2 (2x B300).
+# Launch from repo root: torchrun --nproc_per_node=8 /path/to/halo/scripts/training/preference/smpo.py configs/halo/inkling2_small_vlm_smpo.yaml
+
+# --- Model ---
+model_name_or_path: thinkingmachines/Inkling-2-Small
+moe_balancing: none
+pad_token: "<|endoftext|>"
+bf16: true
+
+# --- Parallelism & frozen quantized experts ---
+expert_parallel_size: 8
+expert_tensor_parallel_size: 1
+frozen_quantized_experts: true
+ep_lazy_loading: true
+merge_expert_lora_on_save: false
+
+# --- Dataset (Arrow save_to_disk dir with Sequence(Image()) and continuation-only chosen/rejected) ---
+dataset:
+  - data/halo_vlm_smpo
+
+# --- SMPO objective & margin schedule ---
+loss_type: smooth_lower_bound
+chosen_sft_ratio: 0.75
+beta: 1.0
+use_margin_schedule: true
+initial_margin: 0.2
+target_margin: 0.4
+lower_clip_percentile: 0.02
+min_log_prob: -2.3
+
+# --- Sequence budgets ---
+padding_free: false
+max_prompt_length: 1600
+max_length: 4096
+
+# --- Chat template (zero reasoning effort; omit reasoning_effort_field on VLM SMPO) ---
+chat_template: configs/halo/templates/inkling2_htr_nothink.jinja
+force_chat_template: true
+
+# --- PEFT ---
+use_peft: true
+lora_r: 8
+lora_alpha: 16
+lora_dropout: 0.0
+lora_target_modules:
+  - o_proj
+  - gate_up_proj
+  - down_proj
+
+# --- Training ---
+num_train_epochs: 1.0
+per_device_train_batch_size: 1
+per_device_eval_batch_size: 1
+gradient_accumulation_steps: 8
+learning_rate: 2.0e-6
+lr_scheduler_type: cosine
+warmup_steps: 0.05
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  use_reentrant: true
+
+# --- Checkpointing & logging ---
+output_dir: checkpoints/inkling2-small-eahtr-smpo
+eval_strategy: steps
+eval_steps: 100
+save_steps: 100
+save_total_limit: 2
+save_only_model: true
+logging_steps: 1
+logging_first_step: true
+remove_unused_columns: false
+dataloader_num_workers: 2

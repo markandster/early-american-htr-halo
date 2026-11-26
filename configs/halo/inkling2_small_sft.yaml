@@ -1,37 +1,41 @@
-# Halo VLM SFT — Inkling-2-Small (NVFP4/MXFP8 frozen quantized experts, EP=2) on public HTR.
+# Halo VLM SFT — Inkling-2-Small (NVFP4/MXFP8 frozen quantized experts, EP=8 default) on public HTR.
 # Aligned with whitecircle/halo (agent-docs/models/inkling2.md).
-# Note: Saved adapters must be converted with `halo run export-engine-adapter` before serving on vLLM.
-# Launch: halo launch sft configs/halo/inkling2_small_sft.yaml --nproc 2
+# Note: Default EP=8 fits ~60-65 GiB/GPU (H100/H200/B200); override --expert_parallel_size=4 on 4x B200
+# or --expert_parallel_size=2 on 2x B300 (EP=2 allocates ~181.8 GiB/GPU).
+# Saved adapters must be exported with `halo run export-engine-adapter` before serving on vLLM.
+# Launch from repo root: torchrun --nproc_per_node=8 /path/to/halo/scripts/training/sft.py configs/halo/inkling2_small_sft.yaml
 
 # --- Model ---
 model_name_or_path: thinkingmachines/Inkling-2-Small
 moe_balancing: none
 pad_token: "<|endoftext|>"
+bf16: true
 
 # --- Parallelism & frozen quantized experts (mandatory for shipped NVFP4/MXFP8 release) ---
-expert_parallel_size: 2
+expert_parallel_size: 8
 expert_tensor_parallel_size: 1
 frozen_quantized_experts: true
 ep_lazy_loading: true
 merge_expert_lora_on_save: false
 
-# --- Dataset (CC-BY-4.0 / Public Domain only) ---
+# --- Dataset (CC-BY-4.0 / Public Domain save_to_disk Arrow dataset or HF Hub repo) ---
 dataset:
-  - data/public_train.jsonl
+  - data/halo_vlm_sft
 conversation_field: messages
 images_field: images
-test_size: 0.05
 
 # --- Sequence budget & VLM constraints ---
 packing: false
-max_length: 8192
+max_length: 4096
 
 # --- Tokens & chat template ---
 train_on_completions_only: true
-assistant_message_template: "<|message_model|>"
+chat_template: configs/halo/templates/inkling2_htr_nothink.jinja
+force_chat_template: true
+assistant_message_template: "<|message_model|><|content_text|>"
 
 # --- PEFT ---
-# Halo requires pairing expert adapters with o_proj (expert LoRA alone is refused).
+# Halo requires pairing expert adapters with o_proj; lora_r % 8 == 0 is required for grouped GEMM stride alignment.
 use_peft: true
 lora_r: 8
 lora_alpha: 16
@@ -62,5 +66,6 @@ save_total_limit: 2
 save_only_model: true
 logging_steps: 1
 logging_first_step: true
+log_decoded_samples: true
 remove_unused_columns: false
 dataloader_num_workers: 2

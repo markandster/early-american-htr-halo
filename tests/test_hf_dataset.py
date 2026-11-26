@@ -1,9 +1,17 @@
 """Unit tests for the opt-in Hugging Face public dataset publisher."""
 
+import sys
+import types
+from typing import Any
+
 import pytest
 import yaml
 
-from eahtr.hf_dataset import build_hf_dataset_card, validate_records_for_public_publish
+from eahtr.hf_dataset import (
+    build_hf_dataset_card,
+    push_splits_to_hf_hub,
+    validate_records_for_public_publish,
+)
 
 
 def _sample_record(idx: int, *, split: str, lic: str = "CC-BY-4.0") -> dict[str, object]:
@@ -57,6 +65,84 @@ def test_validate_records_rejects_writer_doc_and_ngram_overlap() -> None:
     val_same_ngram["text"] = train_rec["text"]
     with pytest.raises(ValueError, match="leakage detected"):
         validate_records_for_public_publish({"train": [train_rec], "val": [val_same_ngram]})
+
+    test_same_writer = _sample_record(4, split="test_public")
+    val_clean = _sample_record(5, split="val")
+    test_same_writer["writer_key"] = val_clean["writer_key"]
+    with pytest.raises(ValueError, match="val.*test_public"):
+        validate_records_for_public_publish(
+            {"train": [train_rec], "val": [val_clean], "test_public": [test_same_writer]}
+        )
+
+
+def test_push_splits_to_hf_hub_emits_halo_schema_and_wraps_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    pushed_holders: list[dict[str, Any]] = []
+
+    class FakeFeature:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            self.args = args
+            self.kwargs = kwargs
+
+    class FakeFeatures(dict):
+        pass
+
+    class FakeDataset:
+        def __init__(self, data: dict[str, Any], features: FakeFeatures) -> None:
+            self.data = data
+            self.features = features
+
+        @classmethod
+        def from_dict(cls, data: dict[str, Any], features: FakeFeatures) -> "FakeDataset":
+            return cls(data, features)
+
+    class FakeDatasetDict(dict):
+        def push_to_hub(self, repo_id: str, private: bool = False) -> None:
+            pushed_holders.append({"repo_id": repo_id, "private": private, "splits": dict(self)})
+
+    fake_datasets = types.ModuleType("datasets")
+    fake_datasets.Dataset = FakeDataset  # type: ignore[attr-defined]
+    fake_datasets.DatasetDict = FakeDatasetDict  # type: ignore[attr-defined]
+    fake_datasets.Features = FakeFeatures  # type: ignore[attr-defined]
+    fake_datasets.Image = FakeFeature  # type: ignore[attr-defined]
+    fake_datasets.Sequence = lambda inner: ("Sequence", inner)  # type: ignore[attr-defined]
+    fake_datasets.Value = lambda dtype: ("Value", dtype)  # type: ignore[attr-defined]
+
+    uploaded_files: list[str] = []
+
+    class WorkingHfApi:
+        def create_repo(self, **kwargs: object) -> None:
+            return None
+
+        def upload_file(self, **kwargs: object) -> None:
+            uploaded_files.append(str(kwargs["path_in_repo"]))
+
+    fake_hf_hub = types.ModuleType("huggingface_hub")
+    fake_hf_hub.HfApi = WorkingHfApi  # type: ignore[attr-defined]
+
+    monkeypatch.setitem(sys.modules, "datasets", fake_datasets)
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hf_hub)
+
+    splits = {
+        "train": [_sample_record(1, split="train")],
+        "val": [_sample_record(2, split="val")],
+        "test_public": [_sample_record(3, split="test_public")],
+    }
+    url = push_splits_to_hf_hub(splits, "markandster/test-htr", {"train_sides": 1})
+    assert url == "https://huggingface.co/datasets/markandster/test-htr"
+    assert uploaded_files == ["README.md"]
+    assert set(pushed_holders[0]["splits"]) == {"train", "validation", "test_public"}
+    train_ds = pushed_holders[0]["splits"]["train"]
+    assert train_ds.data["images"] == [["/tmp/train_1.jpg"]]
+    assert train_ds.data["messages"][0][0]["content"][0]["type"] == "image"
+    assert train_ds.features["images"][0] == "Sequence"
+
+    class FailingHfApi:
+        def create_repo(self, **kwargs: object) -> None:
+            raise OSError("network unreachable")
+
+    fake_hf_hub.HfApi = FailingHfApi  # type: ignore[attr-defined]
+    with pytest.raises(RuntimeError, match="Failed pushing public dataset"):
+        push_splits_to_hf_hub(splits, "markandster/test-htr", {"train_sides": 1})
 
 
 def test_build_hf_dataset_card_has_valid_yaml_and_attribution() -> None:

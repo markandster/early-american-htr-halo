@@ -11,11 +11,18 @@ Every split passed to this module is gated on:
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
+from itertools import combinations
 import json
 from typing import Any
 
 from .corpus import verify_source_license
 from .hygiene import audit_split_disjointness
+
+DEFAULT_TRANSCRIPTION_PROMPT = (
+    "Transcribe every word on this manuscript page using only the visible ink. "
+    "Preserve the writer's original spelling, capitalization, punctuation, "
+    "abbreviations, and line breaks. Do not modernize spelling or add commentary."
+)
 
 
 def validate_records_for_public_publish(
@@ -23,7 +30,7 @@ def validate_records_for_public_publish(
     *,
     ngram_size: int = 32,
 ) -> dict[str, Any]:
-    """Verify public-license compliance and strict train/eval split disjointness."""
+    """Verify public-license compliance and strict all-pairwise split disjointness."""
     train_rows = records_by_split.get("train", [])
     if not train_rows:
         raise ValueError("Cannot publish dataset: 'train' split is empty.")
@@ -40,14 +47,13 @@ def validate_records_for_public_publish(
             observed_licenses.add(license_id)
 
     audits: dict[str, dict[str, Any]] = {}
-    for split_name, rows in records_by_split.items():
-        if split_name == "train" or not rows:
-            continue
-        audit = audit_split_disjointness(train_rows, rows, ngram_size=ngram_size)
-        audits[f"train_vs_{split_name}"] = audit
+    non_empty_splits = [(name, rows) for name, rows in records_by_split.items() if rows]
+    for (left_name, left_rows), (right_name, right_rows) in combinations(non_empty_splits, 2):
+        audit = audit_split_disjointness(left_rows, right_rows, ngram_size=ngram_size)
+        audits[f"{left_name}_vs_{right_name}"] = audit
         if not audit["passed"]:
             raise ValueError(
-                f"Cannot publish dataset: leakage detected between 'train' and '{split_name}': {audit}"
+                f"Cannot publish dataset: leakage detected between '{left_name}' and '{right_name}': {audit}"
             )
 
     return {
@@ -128,11 +134,11 @@ def push_splits_to_hf_hub(
     *,
     private: bool = False,
 ) -> str:
-    """Validate public splits and push a DatasetDict + README card to Hugging Face Hub."""
+    """Validate public splits and push a Halo-ready DatasetDict + README card to Hugging Face Hub."""
     validation = validate_records_for_public_publish(records_by_split)
 
     try:
-        from datasets import Dataset, DatasetDict, Features, Image as HFImage, Value
+        from datasets import Dataset, DatasetDict, Features, Image as HFImage, Sequence, Value
         from huggingface_hub import HfApi
     except ImportError as exc:
         raise RuntimeError(
@@ -142,11 +148,17 @@ def push_splits_to_hf_hub(
 
     features = Features(
         {
+            "messages": [
+                {
+                    "role": Value("string"),
+                    "content": [{"type": Value("string"), "text": Value("string")}],
+                }
+            ],
+            "images": Sequence(HFImage()),
             "record_id": Value("string"),
             "collection": Value("string"),
             "document_id": Value("string"),
             "writer_key": Value("string"),
-            "image": HFImage(),
             "image_sha256": Value("string"),
             "text": Value("string"),
             "word_count": Value("int32"),
@@ -155,23 +167,41 @@ def push_splits_to_hf_hub(
         }
     )
 
+    split_name_map = {"val": "validation"}
     hf_splits: dict[str, Any] = {}
     for split_name, rows in records_by_split.items():
         if not rows:
             continue
+        hub_split = split_name_map.get(split_name, split_name)
         columns = {
+            "messages": [
+                [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "image", "text": None},
+                            {"type": "text", "text": str(r.get("prompt") or DEFAULT_TRANSCRIPTION_PROMPT)},
+                        ],
+                    },
+                    {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": str(r["text"])}],
+                    },
+                ]
+                for r in rows
+            ],
+            "images": [[str(r["image_path"])] for r in rows],
             "record_id": [str(r["record_id"]) for r in rows],
             "collection": [str(r["collection"]) for r in rows],
             "document_id": [str(r["document_id"]) for r in rows],
             "writer_key": [str(r["writer_key"]) for r in rows],
-            "image": [str(r["image_path"]) for r in rows],
             "image_sha256": [str(r["image_sha256"]) for r in rows],
             "text": [str(r["text"]) for r in rows],
             "word_count": [int(r["word_count"]) for r in rows],
             "license": [str(r["license"]) for r in rows],
             "split": [str(r.get("split", split_name)) for r in rows],
         }
-        hf_splits[split_name] = Dataset.from_dict(columns, features=features)
+        hf_splits[hub_split] = Dataset.from_dict(columns, features=features)
 
     dataset_dict = DatasetDict(hf_splits)
     merged_audit = dict(audit_summary)

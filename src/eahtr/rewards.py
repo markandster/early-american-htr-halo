@@ -33,6 +33,20 @@ DEFAULT_HISTORICAL_SPELLING_PAIRS: tuple[tuple[str, str], ...] = (
     ("goverment", "government"),
 )
 
+_DEFAULT_SPELLING_REGEXES: tuple[tuple[re.Pattern[str], re.Pattern[str]], ...] = tuple(
+    (
+        re.compile(rf"\b{re.escape(archaic.lower())}\b"),
+        re.compile(rf"\b{re.escape(modern.lower())}\b"),
+    )
+    for archaic, modern in DEFAULT_HISTORICAL_SPELLING_PAIRS
+)
+
+DEFAULT_PREFERENCE_PROMPT = (
+    "Transcribe every word on this manuscript page using only the visible ink. "
+    "Preserve the writer's original spelling, capitalization, punctuation, "
+    "abbreviations, and line breaks. Do not modernize spelling or add commentary."
+)
+
 
 @dataclass(frozen=True, slots=True)
 class ArchivalRewardConfig:
@@ -158,14 +172,24 @@ def count_modernizations(
     variant_pairs: list[tuple[str, str]] | tuple[tuple[str, str], ...] | None = None,
 ) -> int:
     """Count archaic spellings present in reference that were replaced by modern forms in prediction."""
-    pairs = variant_pairs if variant_pairs is not None else DEFAULT_HISTORICAL_SPELLING_PAIRS
+    if variant_pairs is None:
+        compiled_pairs: tuple[tuple[re.Pattern[str], re.Pattern[str]], ...] | list[
+            tuple[re.Pattern[str], re.Pattern[str]]
+        ] = _DEFAULT_SPELLING_REGEXES
+    else:
+        compiled_pairs = [
+            (
+                re.compile(rf"\b{re.escape(archaic.lower())}\b"),
+                re.compile(rf"\b{re.escape(modern.lower())}\b"),
+            )
+            for archaic, modern in variant_pairs
+        ]
+
     pred_low = (prediction or "").lower()
     ref_low = (reference or "").lower()
 
     modernizations = 0
-    for archaic, modern in pairs:
-        archaic_re = re.compile(rf"\b{re.escape(archaic.lower())}\b")
-        modern_re = re.compile(rf"\b{re.escape(modern.lower())}\b")
+    for archaic_re, modern_re in compiled_pairs:
         ref_count = len(archaic_re.findall(ref_low))
         if ref_count == 0:
             continue
@@ -331,6 +355,62 @@ def score_group_completions(
     return scored_rows
 
 
+def build_preference_pairs(
+    records_with_rollouts: list[dict[str, object]],
+    min_reward_margin: float = 0.05,
+    *,
+    prompt_text: str = DEFAULT_PREFERENCE_PROMPT,
+    config: ArchivalRewardConfig | None = None,
+    variant_pairs: list[tuple[str, str]] | tuple[tuple[str, str], ...] | None = None,
+) -> list[dict[str, object]]:
+    """Build Halo VLM SMPO/DPO preference pairs from scored multi-rollout records."""
+    if min_reward_margin < 0.0:
+        raise ValueError("min_reward_margin must be non-negative")
+
+    pairs: list[dict[str, object]] = []
+    for rec in records_with_rollouts:
+        image_path = str(rec.get("image_path") or "").strip()
+        if not image_path:
+            raise ValueError(f"Record {rec.get('record_id', '<unknown>')!r} is missing required image_path")
+
+        completions_raw = rec.get("completions")
+        completions = [str(c) for c in (completions_raw if isinstance(completions_raw, list) else [])]
+        finish_reasons_raw = rec.get("finish_reasons")
+        finish_reasons = (
+            [str(fr) for fr in finish_reasons_raw] if isinstance(finish_reasons_raw, list) else None
+        )
+        scored = score_group_completions(
+            completions,
+            str(rec.get("text") or rec.get("reference") or ""),
+            finish_reasons,
+            config=config,
+            variant_pairs=variant_pairs,
+        )
+        if len(scored) < 2:
+            continue
+
+        best = max(scored, key=lambda item: float(item["reward"]))
+        worst = min(scored, key=lambda item: float(item["reward"]))
+        margin = float(best["reward"]) - float(worst["reward"])
+        if margin < min_reward_margin:
+            continue
+
+        row_prompt = str(rec.get("prompt") or prompt_text)
+        pairs.append(
+            {
+                "record_id": str(rec.get("record_id", "")),
+                "images": [image_path],
+                "prompt": [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": row_prompt}]}],
+                "chosen": [{"role": "assistant", "content": str(best["completion"])}],
+                "rejected": [{"role": "assistant", "content": str(worst["completion"])}],
+                "chosen_reward": float(best["reward"]),
+                "rejected_reward": float(worst["reward"]),
+                "margin": round(margin, 6),
+            }
+        )
+    return pairs
+
+
 def score_jsonl_file(input_path: Path, output_path: Path) -> int:
     """Score rollout groups from an input JSONL file and write scored JSONL for Offline GRPO."""
     rows_written = 0
@@ -344,7 +424,11 @@ def score_jsonl_file(input_path: Path, output_path: Path) -> int:
             reference = row["reference"]
             finish_reasons = row.get("finish_reasons")
             scored = score_group_completions(completions, reference, finish_reasons)
-            out_row = {**row, "scored_completions": scored}
+            out_row = {
+                **row,
+                "rewards": [float(item["reward"]) for item in scored],
+                "scored_completions": scored,
+            }
             fout.write(json.dumps(out_row, ensure_ascii=False) + "\n")
             rows_written += 1
     return rows_written

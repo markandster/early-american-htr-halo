@@ -35,6 +35,7 @@ from .metrics import ScoreBreakdown, normalize_lenient, normalize_strict, score_
 from .rewards import (
     ArchivalRewardConfig,
     ArchivalRewardResult,
+    build_preference_pairs,
     count_editorial_leaks,
     count_modernizations,
     detect_repetition_loop,
@@ -54,6 +55,7 @@ __all__ = [
     "assign_deterministic_split",
     "audit_split_disjointness",
     "build_hf_dataset_card",
+    "build_preference_pairs",
     "clean_diplomatic_target",
     "count_editorial_leaks",
     "count_modernizations",

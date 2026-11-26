@@ -1,39 +1,49 @@
 # Halo VLM SFT — Gemma-4 26B-A4B-IT (MoE EP=8) on rights-cleared 18th-century diplomatic HTR.
-# Aligned with whitecircle/halo/examples/sft/gemma4/gemma4-26b-a4b-ultrachat-ep.yaml & gemma4.md.
-# Launch: torchrun --nproc_per_node=8 scripts/training/sft.py configs/halo/gemma4_26b_a4b_sft.yaml
+# Aligned with whitecircle/halo (agent-docs/models/gemma4.md).
+# Note: Prepare a local staged processor dir with max_soft_tokens=1120 and image_seq_length=1120
+# before launching Halo (Halo apply_vision_options only sets min_pixels/max_pixels).
+# Launch from repo root: torchrun --nproc_per_node=8 /path/to/halo/scripts/training/sft.py configs/halo/gemma4_26b_a4b_sft.yaml
 
 # --- Model ---
 model_name_or_path: google/gemma-4-26B-A4B-it
 attn_implementation: sdpa  # required for Gemma-4 global_head_dim=512
 moe_balancing: none        # Gemma-4 has no native aux-loss term or EP bias-update path
+bf16: true
 
 # --- Parallelism & MoE precision ---
 expert_parallel_size: 8
 fp32_experts: true         # upcast precision-sensitive expert weights (omit fp32_non_ep_params & fp32_router)
 
-# --- Dataset (CC-BY-4.0 / Public Domain only) ---
+# --- Dataset (CC-BY-4.0 / Public Domain save_to_disk Arrow dataset or HF Hub repo) ---
 dataset:
-  - data/public_train.jsonl
+  - data/halo_vlm_sft
 conversation_field: messages
 images_field: images
-test_size: 0.05
 
 # --- Sequence budget & VLM constraints ---
 packing: false
-max_length: 8192
+max_length: 4096
 
 # --- Tokens & chat template ---
 train_on_completions_only: true
-assistant_message_template: "<|turn>model\n"
+chat_template: configs/halo/templates/gemma4_htr_nothink.jinja
+force_chat_template: true
+assistant_message_template: "<|turn>model\n<|channel>thought\n<channel|>"
 pad_token: <pad>
 
 # --- PEFT ---
-# all-linear resolves into inner nn.Linear of Gemma4ClippableLinear vision layers too.
+# Explicit attention + grouped expert projections (all-linear under EP leaves all 128 MoE experts frozen).
 use_peft: true
 lora_r: 16
 lora_alpha: 32
 lora_dropout: 0.05
-lora_target_modules: all-linear
+lora_target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - gate_up_proj
+  - down_proj
 
 # --- Training ---
 num_train_epochs: 1.5
@@ -45,7 +55,7 @@ lr_scheduler_type: cosine
 warmup_steps: 0.05
 gradient_checkpointing: true
 gradient_checkpointing_kwargs:
-  use_reentrant: true
+  use_reentrant: false
 
 # --- Checkpointing & logging ---
 output_dir: checkpoints/gemma4-26b-a4b-eahtr-sft
@@ -56,5 +66,6 @@ save_total_limit: 2
 save_only_model: true
 logging_steps: 1
 logging_first_step: true
+log_decoded_samples: true
 remove_unused_columns: false
 dataloader_num_workers: 2

@@ -43,6 +43,16 @@ def parse_alto_xml_lines(xml_text: str) -> list[str]:
     return lines
 
 
+def _extract_unicode_from_equiv(equiv_elem: ET.Element) -> str:
+    """Return stripped text from a direct <Unicode> child of a <TextEquiv> element."""
+    for sub in equiv_elem:
+        if _local_tag(sub.tag) == "Unicode" and sub.text:
+            cand = sub.text.strip()
+            if cand:
+                return cand
+    return ""
+
+
 def parse_page_xml_lines(xml_text: str) -> list[str]:
     """Extract ordered line strings from a namespace-agnostic PAGE-XML document."""
     root = ET.fromstring(xml_text)
@@ -50,17 +60,25 @@ def parse_page_xml_lines(xml_text: str) -> list[str]:
     for elem in root.iter():
         if _local_tag(elem.tag) != "TextLine":
             continue
+        # Check direct <TextEquiv>/<Unicode> children first so preceding <Word> children cannot shadow the line text.
         line_text = ""
-        for child in elem.iter():
+        for child in elem:
             if _local_tag(child.tag) == "TextEquiv":
-                for sub in child:
-                    if _local_tag(sub.tag) == "Unicode" and sub.text:
-                        cand = sub.text.strip()
-                        if cand:
-                            line_text = cand
-                            break
+                line_text = _extract_unicode_from_equiv(child)
                 if line_text:
                     break
+        if not line_text:
+            word_parts: list[str] = []
+            for child in elem:
+                if _local_tag(child.tag) != "Word":
+                    continue
+                for sub in child:
+                    if _local_tag(sub.tag) == "TextEquiv":
+                        word_txt = _extract_unicode_from_equiv(sub)
+                        if word_txt:
+                            word_parts.append(word_txt)
+                            break
+            line_text = " ".join(word_parts).strip()
         if line_text:
             lines.append(line_text)
     return lines

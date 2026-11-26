@@ -2,8 +2,12 @@
 
 import json
 from pathlib import Path
+import time
+
+import pytest
 
 from eahtr.rewards import (
+    build_preference_pairs,
     count_editorial_leaks,
     count_modernizations,
     detect_repetition_loop,
@@ -109,3 +113,61 @@ def test_group_scoring_and_jsonl_roundtrip(tmp_path: Path) -> None:
     assert count == 1
     written = json.loads(out_path.read_text(encoding="utf-8").strip())
     assert len(written["scored_completions"]) == 3
+    assert len(written["rewards"]) == 3
+    assert written["rewards"][0] > written["rewards"][1] > written["rewards"][2]
+
+
+def test_build_preference_pairs_selection_filtering_and_error_guards() -> None:
+    ref = "Head Quarters July 1779 Sir I remain yours"
+    records = [
+        {
+            "record_id": "rec-1",
+            "image_path": "/tmp/page1.jpg",
+            "text": ref,
+            "completions": [ref, "Head Quarters\n-\n-\n-\n-\n-"],
+            "finish_reasons": ["stop", "length"],
+        },
+        {
+            "record_id": "rec-tied",
+            "image_path": "/tmp/page2.jpg",
+            "text": ref,
+            "completions": [ref, ref],
+            "finish_reasons": ["stop", "stop"],
+        },
+        {
+            "record_id": "rec-empty",
+            "image_path": "/tmp/page3.jpg",
+            "text": ref,
+            "completions": [],
+        },
+    ]
+    pairs = build_preference_pairs(records, min_reward_margin=0.05)
+    assert len(pairs) == 1
+    pair = pairs[0]
+    assert pair["images"] == ["/tmp/page1.jpg"]
+    assert pair["prompt"][0]["role"] == "user"
+    assert pair["prompt"][0]["content"][0] == {"type": "image"}
+    assert pair["chosen"] == [{"role": "assistant", "content": ref}]
+    assert pair["rejected_reward"] == -1.0
+    assert pair["margin"] > 0.05
+
+    assert build_preference_pairs(records[1:], min_reward_margin=0.05) == []
+
+    with pytest.raises(ValueError, match="image_path"):
+        build_preference_pairs([{"record_id": "no-img", "text": ref, "completions": [ref, "other"]}])
+
+    with pytest.raises(ValueError, match="finish_reasons"):
+        build_preference_pairs(
+            [{"record_id": "bad-fr", "image_path": "/tmp/p.jpg", "text": ref, "completions": [ref, "x"], "finish_reasons": ["stop"]}]
+        )
+
+
+def test_score_transcription_precompiled_regex_speed() -> None:
+    ref = "We chear the publick with usefull musick whilst encreased"
+    pred = "We cheer the public with useful music while increased"
+    t0 = time.perf_counter()
+    for _ in range(1000):
+        res = score_transcription(pred, ref)
+        assert res.modernizations == 6
+    elapsed = time.perf_counter() - t0
+    assert elapsed < 0.5, f"Expected precompiled 1,000 calls < 0.5s, took {elapsed:.3f}s"

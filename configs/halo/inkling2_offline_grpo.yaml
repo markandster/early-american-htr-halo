@@ -1,15 +1,16 @@
-# Halo Offline GRPO — Inkling-2-Small (frozen NVFP4/MXFP8 experts, EP=2) on archival HTR rollouts.
-# Aligned with whitecircle/halo (agent-docs/models/inkling2.md).
-# Note: Standard online GRPO is refused on Inkling 2 (weight_sync_refusal); offline GRPO requires no server.
-# Launch: halo launch grpo/offline configs/halo/inkling2_offline_grpo.yaml --nproc 2
+# Halo Text-Only Contingency: Offline GRPO — Inkling-2-Small (frozen NVFP4/MXFP8 experts, EP=8).
+# Note: Halo Offline GRPO refuses image columns; use configs/halo/inkling2_small_vlm_smpo.yaml for Stage 2 VLM training.
+# Default EP=8 fits ~60-65 GiB/GPU (H100/H200/B200); override --expert_parallel_size=2 only on 2x B300.
+# Launch: torchrun --nproc_per_node=8 /path/to/halo/scripts/training/grpo/offline.py configs/halo/inkling2_offline_grpo.yaml
 
 # --- Model ---
 model_name_or_path: thinkingmachines/Inkling-2-Small
 moe_balancing: none
 pad_token: "<|endoftext|>"
+bf16: true
 
 # --- Parallelism & frozen quantized experts ---
-expert_parallel_size: 2
+expert_parallel_size: 8
 expert_tensor_parallel_size: 1
 frozen_quantized_experts: true
 ep_lazy_loading: true
@@ -18,7 +19,6 @@ merge_expert_lora_on_save: false
 # --- Dataset (pre-scored with eahtr.rewards) ---
 dataset:
   - data/scored_offline_grpo_rollouts.jsonl
-test_size: 0.05
 
 # --- Offline GRPO hyperparameters ---
 loss_type: bnpo

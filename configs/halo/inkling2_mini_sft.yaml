@@ -1,29 +1,31 @@
 # Halo VLM SFT — Inkling-2-Mini (26.4B / 5.4B active, Apache-2.0) on public diplomatic HTR.
-# Aligned with whitecircle/halo (agent-docs/models/inkling2.md & agent-docs/training-methods/sft.md).
-# Launch: halo launch sft configs/halo/inkling2_mini_sft.yaml --nproc 2
+# Blocked pending upstream whitecircle/halo support for model_type `inkling2_loop` / BF16 release.
+# Retained as an alignment reference; active Track 2 Primary is configs/halo/inkling2_small_sft.yaml.
 
 # --- Model ---
 model_name_or_path: thinkingmachines/Inkling-2-Mini
 moe_balancing: none
-pad_token: "<|endoftext|>"  # Inkling 2 tokenizer ships no pad_token
+pad_token: "<|endoftext|>"
+bf16: true
 
 # --- Parallelism ---
 expert_parallel_size: 2
 
-# --- Dataset (CC-BY-4.0 / Public Domain only) ---
+# --- Dataset (CC-BY-4.0 / Public Domain save_to_disk Arrow dataset or HF Hub repo) ---
 dataset:
-  - data/public_train.jsonl
+  - data/halo_vlm_sft
 conversation_field: messages
 images_field: images
-test_size: 0.05
 
 # --- Sequence budget & VLM constraints ---
 packing: false
-max_length: 8192
+max_length: 4096
 
 # --- Tokens & chat template ---
 train_on_completions_only: true
-assistant_message_template: "<|message_model|>"
+chat_template: configs/halo/templates/inkling2_htr_nothink.jinja
+force_chat_template: true
+assistant_message_template: "<|message_model|><|content_text|>"
 
 # --- PEFT ---
 # Inkling 2 attention includes r_proj (learned relative-logits bias) alongside q/k/v/o.
@@ -59,5 +61,6 @@ save_total_limit: 2
 save_only_model: true
 logging_steps: 1
 logging_first_step: true
+log_decoded_samples: true
 remove_unused_columns: false
 dataloader_num_workers: 2

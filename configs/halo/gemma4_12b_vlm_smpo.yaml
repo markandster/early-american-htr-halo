@@ -1,0 +1,65 @@
+# Halo VLM SMPO — Gemma-4 12B-IT (Stage 2 Verifiable Preference Optimization).
+# Reference-model-free SMPO over deterministic preference pairs scored by eahtr.rewards.
+# Note: Use a local staged processor dir (max_soft_tokens=1120, image_seq_length=1120) and pre-filtered
+# Arrow dataset (1120 + prompt_tokens <= 1600, chosen_tokens <= 2496, total <= 4096).
+# Launch from repo root: torchrun --nproc_per_node=1 /path/to/halo/scripts/training/preference/smpo.py configs/halo/gemma4_12b_vlm_smpo.yaml
+
+# --- Model ---
+model_name_or_path: checkpoints/gemma4-12b-eahtr-sft
+attn_implementation: sdpa
+bf16: true
+
+# --- Dataset (Arrow save_to_disk dir with Sequence(Image()) and continuation-only chosen/rejected) ---
+dataset:
+  - data/halo_vlm_smpo
+
+# --- SMPO objective & margin schedule ---
+loss_type: smooth_lower_bound
+chosen_sft_ratio: 0.75
+beta: 1.0
+use_margin_schedule: true
+initial_margin: 0.2
+target_margin: 0.4
+lower_clip_percentile: 0.02
+min_log_prob: -2.3
+
+# --- Sequence budgets ---
+padding_free: false
+max_prompt_length: 1600
+max_length: 4096
+
+# --- Tokens & chat template ---
+chat_template: configs/halo/templates/gemma4_htr_nothink.jinja
+force_chat_template: true
+pad_token: <pad>
+
+# --- PEFT ---
+use_peft: true
+lora_r: 16
+lora_alpha: 32
+lora_dropout: 0.0
+lora_target_modules: all-linear
+
+# --- Training ---
+num_train_epochs: 1.0
+per_device_train_batch_size: 1
+per_device_eval_batch_size: 1
+gradient_accumulation_steps: 8
+learning_rate: 2.0e-6
+lr_scheduler_type: cosine
+warmup_steps: 0.05
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  use_reentrant: false
+
+# --- Checkpointing & logging ---
+output_dir: checkpoints/gemma4-12b-eahtr-smpo
+eval_strategy: steps
+eval_steps: 100
+save_steps: 100
+save_total_limit: 2
+save_only_model: true
+logging_steps: 1
+logging_first_step: true
+remove_unused_columns: false
+dataloader_num_workers: 2

@@ -1,32 +1,27 @@
-# Halo Online GRPO — Gemma-4 12B / 26B-A4B with deterministic archival verifier rewards.
-# Aligned with whitecircle/halo/examples/grpo/online/rlvr-online-grpo-template.yaml.
-# Note: For Inkling 2 use configs/halo/inkling2_offline_grpo.yaml (online GRPO is refused on Inkling 2).
-# Launch: start vLLM server with --weight-transfer-config '{"backend": "nccl"}', then
-#   torchrun --nproc_per_node=4 scripts/training/grpo/online.py configs/halo/archival_grpo_online.yaml
+# Halo Text-Only Contingency: Online GRPO — Gemma-4 12B / 26B-A4B text-only RLVR template.
+# Note: Halo Online GRPO refuses image columns; use configs/halo/gemma4_*_vlm_smpo.yaml for Stage 2 VLM training.
+# Rewards use Halo's built-in RLVR source schema as a text-only post-correction contingency placeholder;
+# pre-scored diplomatic archival rewards from eahtr.rewards feed archival_grpo_offline.yaml or *_vlm_smpo.yaml.
+# Launch from repo root: start vLLM server with --weight-transfer-config '{"backend": "nccl"}', then
+#   torchrun --nproc_per_node=4 /path/to/halo/scripts/training/grpo/online.py configs/halo/archival_grpo_online.yaml
 
 # --- Model ---
 model_name_or_path: checkpoints/gemma4-12b-eahtr-sft
 attn_implementation: sdpa
 moe_balancing: none
+bf16: true
 
 # --- Dataset ---
-dataset: data/public_grpo_prompts.jsonl
-test_size: 0.05
+dataset:
+  - data/public_grpo_prompts.jsonl
 prompt_field: prompt
 answer_field: reference
 
-# --- Deterministic archival verifier rewards (matched to eahtr.rewards.ArchivalRewardConfig) ---
+# --- Built-in Halo RLVR reward placeholder (contingency) ---
 rewards:
-  - source: eahtr.rewards
+  - source: accuracy
     name: archival_diplomatic_verifier
     weight: 1.0
-    params:
-      cer_weight: 0.6
-      wer_weight: 0.4
-      modernization_penalty: 0.05
-      format_penalty: 0.10
-      truncation_penalty: 0.25
-      loop_floor: -1.0
 
 # --- GRPO hyperparameters ---
 beta: 0.0
@@ -42,6 +37,7 @@ use_chunked_grpo_logprobs: true  # Gemma-4 262k vocab
 per_device_train_batch_size: 2
 num_train_epochs: 1.0
 gradient_accumulation_steps: 8
+gradient_checkpointing: true
 gradient_checkpointing_kwargs:
   use_reentrant: false
 learning_rate: 5.0e-6

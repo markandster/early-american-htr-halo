@@ -67,36 +67,62 @@ def extract_word_ngrams(text: str, n: int = 32) -> set[str]:
     return hashes
 
 
+def _full_page_text_hash(text: str, min_words: int = 8) -> str | None:
+    """Return normalized full-page SHA-256 hash when page has at least min_words words."""
+    words = unicodedata.normalize("NFC", text or "").lower().split()
+    if len(words) < min_words:
+        return None
+    return hashlib.sha256(" ".join(words).encode("utf-8")).hexdigest()
+
+
 def audit_split_disjointness(
     train_records: list[dict],
     eval_records: list[dict],
     ngram_size: int = 32,
 ) -> dict[str, object]:
-    """Verify zero overlap across document_id, writer_key, image_sha256, and text n-grams."""
+    """Verify zero overlap across document_id, writer_key, image_sha256, exact page hashes, and n-grams."""
     train_docs = {str(r["document_id"]) for r in train_records if r.get("document_id")}
     train_writers = {str(r["writer_key"]) for r in train_records if r.get("writer_key")}
     train_images = {str(r["image_sha256"]) for r in train_records if r.get("image_sha256")}
     train_ngrams: set[str] = set()
+    train_exact_hashes: set[str] = set()
     for rec in train_records:
-        train_ngrams.update(extract_word_ngrams(str(rec.get("text", "")), n=ngram_size))
+        text = str(rec.get("text", ""))
+        train_ngrams.update(extract_word_ngrams(text, n=ngram_size))
+        page_hash = _full_page_text_hash(text)
+        if page_hash is not None:
+            train_exact_hashes.add(page_hash)
 
     eval_docs = {str(r["document_id"]) for r in eval_records if r.get("document_id")}
     eval_writers = {str(r["writer_key"]) for r in eval_records if r.get("writer_key")}
     eval_images = {str(r["image_sha256"]) for r in eval_records if r.get("image_sha256")}
     eval_ngrams: set[str] = set()
+    eval_exact_hashes: set[str] = set()
     for rec in eval_records:
-        eval_ngrams.update(extract_word_ngrams(str(rec.get("text", "")), n=ngram_size))
+        text = str(rec.get("text", ""))
+        eval_ngrams.update(extract_word_ngrams(text, n=ngram_size))
+        page_hash = _full_page_text_hash(text)
+        if page_hash is not None:
+            eval_exact_hashes.add(page_hash)
 
     doc_collisions = sorted(train_docs & eval_docs)
     writer_collisions = sorted(train_writers & eval_writers)
     image_collisions = sorted(train_images & eval_images)
     ngram_collisions = len(train_ngrams & eval_ngrams)
+    exact_text_collisions = len(train_exact_hashes & eval_exact_hashes)
 
-    passed = not (doc_collisions or writer_collisions or image_collisions or ngram_collisions)
+    passed = not (
+        doc_collisions
+        or writer_collisions
+        or image_collisions
+        or ngram_collisions
+        or exact_text_collisions
+    )
     return {
         "passed": passed,
         "doc_collisions": doc_collisions,
         "writer_collisions": writer_collisions,
         "image_collisions": image_collisions,
         "ngram_collisions": ngram_collisions,
+        "exact_text_collisions": exact_text_collisions,
     }
