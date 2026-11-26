@@ -104,6 +104,7 @@ from eahtr.colab_pipeline import (
     assign_balanced_group_splits,
     assign_deterministic_split,
     assign_revcity_item_groups,
+    build_shifted_completion_mask,
     make_sham_derangement,
     parse_revcity_stem_id,
     resolve_vision_modules_to_save,

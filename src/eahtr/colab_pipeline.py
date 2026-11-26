@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import sys
+from typing import Any
 
 if __name__ == "__main__" and not __package__:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -51,6 +52,7 @@ __all__ = [
     "assign_balanced_group_splits",
     "assign_deterministic_split",
     "assign_revcity_item_groups",
+    "build_shifted_completion_mask",
     "make_sham_derangement",
     "parse_revcity_stem_id",
     "resolve_vision_modules_to_save",
@@ -58,6 +60,18 @@ __all__ = [
     "validate_competition_candidate",
     "write_competition_colab_notebook",
 ]
+
+
+def build_shifted_completion_mask(labels: Any) -> tuple[Any, Any]:
+    """Build shifted 2D bool ``logits_to_keep`` mask and compact targets for causal-LM loss."""
+    import torch
+
+    if labels.ndim != 2 or labels.shape[1] < 2:
+        raise ValueError(f"Expected 2D labels with seq_len >= 2, got shape {tuple(labels.shape)}")
+    keep_mask = torch.zeros_like(labels, dtype=torch.bool)
+    keep_mask[:, :-1] = labels[:, 1:] != -100
+    targets = labels[:, 1:][keep_mask[:, :-1]]
+    return keep_mask, targets
 
 
 def _code_cell(code: str) -> dict:

@@ -1,123 +1,9 @@
-"""Cell 5 training-helper assembly (processor loader, batch builder, arm runner)."""
+"""Cell 5 training-helper assembly (arm runner combining loader and eval sections)."""
 
 from __future__ import annotations
 
 from .colab_cells_eval import build_cell_5_eval_section
-
-CELL_5_LOADER_SOURCE = """
-# === Training, Vision-Grad Verification & Verifiable Scoring Loop ===
-def load_processor_fullres(spec_dict: dict):
-    hf_repo = spec_dict['hf_repo']
-    max_pixels = spec_dict['max_pixels']
-    trust = bool(spec_dict.get('trust_remote_code', False))
-    rev = spec_dict.get('hf_revision')
-    proc_kw = {'trust_remote_code': trust}
-    if rev:
-        proc_kw['revision'] = rev
-    try:
-        proc = AutoProcessor.from_pretrained(hf_repo, max_pixels=max_pixels, **proc_kw)
-    except TypeError:
-        proc = AutoProcessor.from_pretrained(hf_repo, **proc_kw)
-    ip = getattr(proc, 'image_processor', None)
-    if ip is not None:
-        if hasattr(ip, 'max_soft_tokens'):
-            ip.max_soft_tokens = 1120
-        if hasattr(ip, 'image_seq_length'):
-            ip.image_seq_length = 1120
-        if hasattr(ip, 'max_pixels'):
-            ip.max_pixels = max_pixels
-    if hasattr(proc, 'image_seq_length'):
-        proc.image_seq_length = 1120
-    if 'gemma-4' in hf_repo.lower():
-        tpl_path = REPO_DIR / 'configs' / 'halo' / 'templates' / 'gemma4_htr_nothink.jinja'
-        if tpl_path.is_file():
-            htr_tpl = tpl_path.read_text(encoding='utf-8')
-            proc.chat_template = htr_tpl
-            if hasattr(proc, 'tokenizer') and proc.tokenizer is not None:
-                proc.tokenizer.chat_template = htr_tpl
-    return proc
-
-
-def load_vlm_model(hf_repo: str, load_kwargs: dict):
-    # Load VLM cleanly; Gemma 4 global_head_dim=512 requires sdpa (FlashAttention rejects it).
-    resolved_kwargs = dict(load_kwargs)
-    if 'gemma-4' in hf_repo.lower() and 'attn_implementation' not in resolved_kwargs:
-        resolved_kwargs['attn_implementation'] = 'sdpa'
-    prefer_multimodal = 'inkling' in hf_repo.lower() and AutoModelForMultimodalLM is not None
-    loaders = (
-        [AutoModelForMultimodalLM, AutoModelForImageTextToText]
-        if prefer_multimodal
-        else [cls for cls in (AutoModelForImageTextToText, AutoModelForMultimodalLM) if cls is not None]
-    )
-    last_err = None
-    for cls in loaders:
-        try:
-            return cls.from_pretrained(hf_repo, **resolved_kwargs)
-        except (ValueError, KeyError, TypeError) as exc:
-            last_err = exc
-    raise last_err
-
-
-def _apply_chat_nothink(processor, messages: list[dict], *, add_generation_prompt: bool) -> str:
-    try:
-        return processor.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=add_generation_prompt,
-            enable_thinking=False,
-        )
-    except TypeError:
-        return processor.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=add_generation_prompt,
-        )
-
-
-def _resolve_turn_terminator(tokenizer) -> str:
-    eot = getattr(tokenizer, 'eot_token', None)
-    if isinstance(eot, str) and eot:
-        return eot
-    vocab = tokenizer.get_vocab() if hasattr(tokenizer, 'get_vocab') else {}
-    if '<turn|>' in vocab:
-        return '<turn|>'
-    return getattr(tokenizer, 'eos_token', None) or ''
-
-
-def build_training_batch(processor, image: Image.Image, target_text: str, device):
-    tok = getattr(processor, 'tokenizer', processor)
-    user_msgs = [{'role': 'user', 'content': [{'type': 'image'}, {'type': 'text', 'text': DIPLOMATIC_PROMPT}]}]
-    prompt_str = _apply_chat_nothink(processor, user_msgs, add_generation_prompt=True)
-    eot_token = _resolve_turn_terminator(tok)
-    full_str = prompt_str + target_text + eot_token
-
-    prompt_inputs = processor(text=[prompt_str], images=[image], return_tensors='pt')
-    full_inputs = processor(text=[full_str], images=[image], return_tensors='pt')
-    prompt_len = prompt_inputs['input_ids'].shape[1]
-
-    # Never truncate expanded VLM tensors mid-sample (desyncs mm_token_type_ids / token_type_ids).
-    if full_inputs['input_ids'].shape[1] > MAX_SEQ_LEN:
-        return None
-
-    assert full_inputs['input_ids'].shape[1] >= prompt_len and torch.equal(
-        full_inputs['input_ids'][:, :prompt_len], prompt_inputs['input_ids']
-    ), 'Tokenized prompt/full prefix mismatch detected; refusing misaligned training batch.'
-
-    labels = full_inputs['input_ids'].clone()
-    labels[:, :prompt_len] = -100
-    pad_id = getattr(tok, 'pad_token_id', None)
-    if pad_id is not None:
-        labels[labels == pad_id] = -100
-    img_tid = getattr(tok, 'image_token_id', None)
-    if img_tid is not None:
-        labels[labels == img_tid] = -100
-    assert int((labels[:, prompt_len:] != -100).sum().item()) > 0, (
-        'No unmasked completion tokens after prompt boundary.'
-    )
-    full_inputs['labels'] = labels
-    return {k: v.to(device) if torch.is_tensor(v) else v for k, v in full_inputs.items()}
-
-"""
+from .colab_cells_loader import CELL_5_LOADER_SOURCE
 
 CELL_5_ARM_SOURCE = """
 def _build_arm_cache_key(cand_key: str, arm: str, spec, train_rows: list[dict], eval_rows: list[dict], use_4bit: bool) -> str:
@@ -236,6 +122,13 @@ def run_candidate_arm(cand_key: str, arm: str, arm_train_rows: list[dict], val_s
         model = prepare_model_for_kbit_training(
             model, use_gradient_checkpointing=True, gradient_checkpointing_kwargs=gc_kwargs
         )
+        # Cast frozen fp32 input/output embeddings back to bf16 to avoid 2 GB upcast overhead on L4.
+        for _getter_name in ('get_input_embeddings', 'get_output_embeddings'):
+            _getter = getattr(model, _getter_name, None)
+            if callable(_getter):
+                _emb = _getter()
+                if _emb is not None and hasattr(_emb, 'weight') and not _emb.weight.requires_grad and _emb.weight.dtype == torch.float32:
+                    _emb.to(torch.bfloat16)
     else:
         model.gradient_checkpointing_enable(gradient_checkpointing_kwargs=gc_kwargs)
         model.enable_input_require_grads()
@@ -305,9 +198,16 @@ def run_candidate_arm(cand_key: str, arm: str, arm_train_rows: list[dict], val_s
         accum_count = 0
 
         for row in tqdm(order, desc=f'{cand_key}-{arm} ep{epoch}/{EPOCHS}'):
+            image = batch = model_inputs = keep_mask = targets = out = raw_loss = loss = None
             try:
-                image = Image.open(row['image_path']).convert('RGB')
-                batch = build_training_batch(processor, image, row['text'], model.device)
+                with Image.open(row['image_path']) as _raw_im:
+                    image = _raw_im.convert('RGB')
+                try:
+                    batch = build_training_batch(processor, image, row['text'], model.device)
+                finally:
+                    if hasattr(image, 'close'):
+                        image.close()
+                    image = None
                 if batch is None:
                     skipped_overlength += 1
                     continue
@@ -319,9 +219,18 @@ def run_candidate_arm(cand_key: str, arm: str, arm_train_rows: list[dict], val_s
                         print(f'Batch 0 realized image_tokens_per_page={realized_image_tokens}')
                         if 'gemma-4' in spec.hf_repo.lower() and realized_image_tokens <= 280:
                             raise RuntimeError(f'Gemma 4 vision tokens collapsed to {realized_image_tokens} (<= 280).')
+                keep_mask, targets = build_shifted_completion_mask(batch['labels'])
+                if targets.numel() == 0:
+                    skipped_overlength += 1
+                    continue
+                model_inputs = {k: v for k, v in batch.items() if k != 'labels'}
                 with torch.amp.autocast('cuda', dtype=torch.bfloat16):
-                    out = model(**batch)
-                    loss = out.loss / GRAD_ACCUM_STEPS
+                    out = model(**model_inputs, logits_to_keep=keep_mask)
+                    raw_loss = torch.nn.functional.cross_entropy(
+                        out.logits.reshape(-1, out.logits.size(-1)).float(),
+                        targets.reshape(-1),
+                    )
+                    loss = raw_loss / GRAD_ACCUM_STEPS
                 loss.backward()
                 if not verified_step1_grads:
                     has_live_vision_grad = any(
@@ -330,14 +239,18 @@ def run_candidate_arm(cand_key: str, arm: str, arm_train_rows: list[dict], val_s
                     if not has_live_vision_grad:
                         raise RuntimeError('Live step-1 vision gradient check failed: vision grad norm is zero.')
                     verified_step1_grads = True
-                running_loss += float(out.loss.detach().cpu())
+                running_loss += float(raw_loss.detach().cpu())
                 n_batches += 1
                 accum_count += 1
+                del out, loss, raw_loss, batch, model_inputs, keep_mask, targets
+                out = loss = raw_loss = batch = model_inputs = keep_mask = targets = None
             except torch.cuda.OutOfMemoryError:
                 skipped_oom += 1
                 discarded_oom_microbatches += accum_count
+                out = loss = raw_loss = batch = model_inputs = keep_mask = targets = None
                 optimizer.zero_grad(set_to_none=True)
                 accum_count = 0
+                gc.collect()
                 torch.cuda.empty_cache()
                 continue
 

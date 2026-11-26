@@ -347,3 +347,41 @@ def test_halo_jinja_templates_satisfy_smpo_and_inference_prefix_invariant() -> N
     assert ink_full.startswith(ink_prompt_open)
     assert "Thinking effort level: 0<" in ink_prompt_open
     assert "Thinking effort level: 0.9" not in ink_prompt_open
+
+
+def test_colab_completion_only_logits_and_oom_cleanup() -> None:
+    import ast
+    import importlib.util
+    from eahtr.colab_cells_train import build_cell_5_train_helpers
+    from eahtr.colab_pipeline import build_shifted_completion_mask
+
+    cell5_src = build_cell_5_train_helpers()
+    ast.parse(cell5_src)
+    assert "logits_to_keep=keep_mask" in cell5_src
+    assert "get_input_embeddings" in cell5_src and "torch.bfloat16" in cell5_src
+    assert "torch.optim.AdamW" in cell5_src
+    assert "PagedAdamW8bit" not in cell5_src
+    assert "gc.collect()" in cell5_src
+
+    if importlib.util.find_spec("torch") is not None:
+        import torch
+        import torch.nn.functional as F
+
+        torch.manual_seed(0)
+        vocab = 19
+        logits = torch.randn(1, 10, vocab, dtype=torch.float32)
+        labels = torch.tensor([[-100, -100, -100, -100, 4, 7, 2, -100, 9, 1]], dtype=torch.long)
+
+        # Standard causal-LM loss over full sequence
+        full_loss = F.cross_entropy(logits[:, :-1, :].reshape(-1, vocab), labels[:, 1:].reshape(-1), ignore_index=-100)
+
+        # Shifted logits_to_keep loss over active positions only
+        keep_mask, targets = build_shifted_completion_mask(labels)
+        kept_logits = logits[keep_mask]
+        compact_loss = F.cross_entropy(kept_logits.reshape(-1, vocab), targets.reshape(-1))
+        assert abs(float(full_loss - compact_loss)) <= 1e-6
+
+        # Unshifted mask on positions 4..9 produces a genuinely wrong loss (catches off-by-one shift bug)
+        unshifted_mask = labels != -100
+        wrong_loss = F.cross_entropy(logits[unshifted_mask].reshape(-1, vocab), targets.reshape(-1))
+        assert abs(float(full_loss - wrong_loss)) > 1e-2
