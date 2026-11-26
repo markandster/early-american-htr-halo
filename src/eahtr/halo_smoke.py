@@ -265,6 +265,8 @@ def build_smoke_yaml_configs(
         else:
             updated["save_steps"] = 5
             updated["max_length"] = 4096
+        if use_qlora:
+            updated["bnb_4bit_quant_storage"] = "bfloat16"
         return updated
 
     sft_cfg = _patch(yaml.safe_load(base_sft_yaml.read_text(encoding="utf-8")), sft_dataset_dir, "sft_out", is_smpo=False)
