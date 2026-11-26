@@ -11,6 +11,7 @@ import time
 
 from eahtr.candidates import DIPLOMATIC_PROMPT
 from eahtr.preferences import build_preference_pairs
+from eahtr.revcity_build import resolve_manifest_image_path
 from eahtr.rewards import recommended_max_new_tokens, score_group_completions
 
 
@@ -18,6 +19,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Sample Stage 1 rollouts and build Halo SMPO preference JSONL.")
     parser.add_argument("--model-dir", type=Path, required=True, help="Merged Stage 1 SFT checkpoint directory")
     parser.add_argument("--train-jsonl", type=Path, required=True, help="Train manifest JSONL")
+    parser.add_argument("--image-root", type=Path, default=None, help="Optional root directory overriding manifest image_path")
     parser.add_argument("--out-pref-jsonl", type=Path, required=True, help="Output preference JSONL for export_halo_datasets.py")
     parser.add_argument("--out-rollouts-jsonl", type=Path, default=None, help="Optional raw scored rollout log")
     parser.add_argument("--max-prompts", type=int, default=None)
@@ -59,7 +61,13 @@ def main() -> int:
     rollout_rows: list[dict] = []
     t0 = time.time()
     for row in rows:
-        img = Image.open(row["image_path"]).convert("RGB")
+        img_path = resolve_manifest_image_path(row["image_path"], args.train_jsonl, args.image_root)
+        raw_im = Image.open(img_path)
+        try:
+            img = raw_im.convert("RGB")
+        finally:
+            if hasattr(raw_im, "close"):
+                raw_im.close()
         msgs = [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": DIPLOMATIC_PROMPT}]}]
         prompt = proc.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
         inputs = proc(text=[prompt], images=[img], return_tensors="pt").to(model.device)
@@ -76,7 +84,7 @@ def main() -> int:
         pref_records.append({
             "record_id": row["record_id"], "document_id": row["document_id"], "writer_key": row["writer_key"],
             "image_sha256": row.get("image_sha256", ""), "image_dhash": row.get("image_dhash", ""),
-            "image_path": row["image_path"], "prompt": DIPLOMATIC_PROMPT, "text": row["text"],
+            "image_path": str(img_path), "prompt": DIPLOMATIC_PROMPT, "text": row["text"],
             "completions": comps, "finish_reasons": frs, "max_new_tokens_cap": cap,
             "split": row.get("split", "train"), "source_fold": args.source_fold, "source_checkpoint": str(args.model_dir),
         })

@@ -72,11 +72,14 @@ bash scripts/run_halo_smoke.sh 2>&1 | tee smoke.log
 
 This verifies NVIDIA driver `>= 560.28`, Halo clean-room installation, `1,120` realized image tokens on `VLMDataCollator` batch-0 (`1,092` on sampled page), live Halo PEFT vision-parameter updates, `MAX_STEPS` distinct finite SFT losses, adapter merge + `verify_mlx_export.py`, natural `<turn|>` termination on a short page, fresh-process Stage 1→2 `SMPOTrainer` teacher-forced log-prob continuity (`peft_bf16_autocast` with matching FP32-norm casting when `< 56 GiB`), and `MAX_STEPS` finite SMPO losses.
 
-### Step C — Export Disjoint Public SFT Arrow Dataset
+### Step C — Build Disjoint Public Manifests & Export SFT Arrow Dataset
 
-Generate public manifests via Cell 4 of [notebooks/colab_competition_pretrain_sft.ipynb](../notebooks/colab_competition_pretrain_sft.ipynb) (see [docs/DATA_SHEET.md](DATA_SHEET.md)), re-root Colab's `/content/...` `image_path` entries if moving manifests to another host, stage the high-resolution `1,120`-token Gemma 4 directory, and export the Arrow `DatasetDict` (mapping `val` → Halo internal `test`):
+Generate portable relative-path manifests cleanly from the command line via `scripts/build_revcity_manifests.py` (or optionally via Cell 4 of [notebooks/colab_competition_pretrain_sft.ipynb](../notebooks/colab_competition_pretrain_sft.ipynb); see [docs/DATA_SHEET.md](DATA_SHEET.md)), stage the high-resolution `1,120`-token Gemma 4 directory, and export the Arrow `DatasetDict` (mapping `val` → Halo internal `test`):
 
 ```bash
+python scripts/build_revcity_manifests.py \
+  --download --zip-path data/revcity/revcity-htr.zip --out-dir data/revcity
+
 python scripts/stage_gemma4_highres.py \
   --model google/gemma-4-12B-it --revision 43c9d014b231 \
   --out-dir checkpoints/gemma4-12b-highres-1120 --max-soft-tokens 1120 \
@@ -84,8 +87,8 @@ python scripts/stage_gemma4_highres.py \
 
 python scripts/export_halo_datasets.py \
   --mode sft \
-  --train-jsonl manifests/train.jsonl \
-  --val-jsonl manifests/val.jsonl \
+  --train-jsonl data/revcity/manifests/train.jsonl \
+  --val-jsonl data/revcity/manifests/val.jsonl \
   --out-dir data/halo_vlm_sft \
   --tokenizer checkpoints/gemma4-12b-highres-1120 \
   --max-length 4096 --vision-tokens 1120

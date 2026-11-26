@@ -6,6 +6,7 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import shutil
 import struct
 import sys
 import types
@@ -140,3 +141,110 @@ def test_revcity_build_pins_deterministic_split_hash_and_md5_guard(
             expected_md5="0" * 32,
             min_eval_pages=1,
         )
+
+
+def test_revcity_build_transitive_closure_relocation_and_empty_zip_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ensure_pil_stub(monkeypatch)
+    # Inject a 12-word exact-text collision across two separate document runs (1010 vs 2001)
+    # plus a 32-gram overlap between another pair (1011 vs 3001) to prove transitive union-find.
+    shared_32 = " ".join(f"token{i}" for i in range(34))
+    zip_path = _write_synthetic_revcity_zip(tmp_path / "closure.zip")
+    with zipfile.ZipFile(zip_path, "a") as zf:
+        zf.writestr("apsrevcity%3A2099.png", _make_valid_png_bytes(90))
+        zf.writestr(
+            "apsrevcity%3A2099.xml",
+            _make_alto("Large ledger page number 1 written in Philadelphia on July 1 1776 by clerk alpha beta gamma."),
+        )
+        zf.writestr("hsprevcity%3A3099.png", _make_valid_png_bytes(91))
+        zf.writestr("hsprevcity%3A3099.xml", _make_alto(f"{shared_32} trailing words here"))
+        zf.writestr("apsrevcity%3A1046.png", _make_valid_png_bytes(92))
+        zf.writestr("apsrevcity%3A1046.xml", _make_alto(f"prefix words {shared_32}"))
+
+    out_dir = tmp_path / "bundle"
+    summary = build_revcity_manifests(
+        zip_path,
+        out_dir / "pages",
+        out_dir / "manifests",
+        expected_bytes=None,
+        expected_md5=None,
+        min_eval_pages=1,
+        path_mode="relative",
+    )
+    rec_split = {
+        r["record_id"]: sp
+        for sp in ("train", "val", "test_public")
+        for r in summary["manifests"][sp]
+    }
+    assert rec_split["revcity-apsrevcity_1001"] == rec_split["revcity-apsrevcity_2099"]
+    assert rec_split["revcity-apsrevcity_1046"] == rec_split["revcity-hsprevcity_3099"]
+
+    # Relocate bundle to prove relative manifest image_path portability + --image-root override
+    relocated = tmp_path / "relocated_bundle"
+    shutil.move(str(out_dir), str(relocated))
+    train_manifest = relocated / "manifests" / "train.jsonl"
+    first_row = json.loads(train_manifest.read_text(encoding="utf-8").splitlines()[0])
+    assert not Path(first_row["image_path"]).is_absolute()
+    resolved = resolve_manifest_image_path(first_row["image_path"], train_manifest)
+    assert resolved.is_file()
+
+    flat_root = tmp_path / "flat_imgs"
+    flat_root.mkdir()
+    shutil.copy2(resolved, flat_root / resolved.name)
+    assert resolve_manifest_image_path("/stale/content/pages/" + resolved.name, train_manifest, flat_root).is_file()
+    with pytest.raises(FileNotFoundError, match="Relative manifest image not found"):
+        resolve_manifest_image_path("does_not_exist.png", train_manifest)
+
+    # Empty and corrupt ZIPs must fail closed without writing empty splits
+    empty_zip = tmp_path / "empty.zip"
+    with zipfile.ZipFile(empty_zip, "w"):
+        pass
+    with pytest.raises(ValueError, match="No paired image"):
+        build_revcity_manifests(empty_zip, tmp_path / "ep", tmp_path / "em", expected_bytes=None, expected_md5=None)
+    assert not (tmp_path / "em" / "train.jsonl").exists()
+
+
+def test_build_revcity_manifests_cli_contract(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _ensure_pil_stub(monkeypatch)
+    repo_root = Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location("build_revcity_manifests", repo_root / "scripts" / "build_revcity_manifests.py")
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    zip_path = _write_synthetic_revcity_zip(tmp_path / "cli_revcity.zip")
+    out_dir = tmp_path / "cli_out"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "build_revcity_manifests.py",
+            "--zip-path",
+            str(zip_path),
+            "--out-dir",
+            str(out_dir),
+            "--skip-md5",
+            "--min-eval-pages",
+            "1",
+        ],
+    )
+    assert mod.main() == 0
+    assert (out_dir / "manifests" / "train.jsonl").is_file()
+
+    # Exporting without --tokenizer fails closed cleanly with exit code 2
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["build_revcity_manifests.py", "--zip-path", str(zip_path), "--out-dir", str(out_dir), "--export-halo-dir", str(tmp_path / "arr")],
+    )
+    assert mod.main() == 2
+
+    # Missing archive fails closed with exit code 2
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["build_revcity_manifests.py", "--zip-path", str(tmp_path / "missing.zip"), "--out-dir", str(out_dir), "--skip-md5"],
+    )
+    assert mod.main() == 2
+
