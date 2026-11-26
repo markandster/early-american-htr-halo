@@ -336,30 +336,37 @@ def verify_exported_vlm_dir(
                         for x in range(16)
                         for c in ((x * 16 + y) % 256, (y * 16 + 64) % 256, ((x ^ y) * 16) % 256)
                     )
-                    probe_img = Image.frombytes("RGB", (16, 16), raw_rgb)
+                    raw_l = bytes((x * 13 + y * 7) % 256 for y in range(16) for x in range(16))
+                    probe_imgs = [
+                        Image.frombytes("RGB", (16, 16), raw_rgb),
+                        Image.frombytes("L", (16, 16), raw_l),
+                    ]
                 else:
-                    probe_img = Image.new("RGB", (16, 16), (255, 255, 255))
+                    probe_imgs = [Image.new("RGB", (16, 16), (255, 255, 255))]
                 ref_p = ref_proc.apply_chat_template(sample, tokenize=False, add_generation_prompt=True)
                 exp_p = exp_proc.apply_chat_template(sample, tokenize=False, add_generation_prompt=True)
-                ref_enc = ref_proc(text=[ref_p], images=[probe_img], return_tensors="pt")
-                exp_enc = exp_proc(text=[exp_p], images=[probe_img], return_tensors="pt")
-                ref_ids = ref_enc["input_ids"][0].tolist() if hasattr(ref_enc["input_ids"][0], "tolist") else list(ref_enc["input_ids"][0])
-                exp_ids = exp_enc["input_ids"][0].tolist() if hasattr(exp_enc["input_ids"][0], "tolist") else list(exp_enc["input_ids"][0])
-                if ref_ids != exp_ids:
-                    raise ValueError(f"{model_dir}: multimodal AutoProcessor input_ids diverged from {reference_dir}")
-                if "pixel_values" in ref_enc and "pixel_values" in exp_enc:
-                    def _flat(v: Any) -> list[float]:
-                        if hasattr(v, "flatten"):
-                            return [float(x) for x in v.flatten().tolist()]
-                        if isinstance(v, (list, tuple)):
-                            out: list[float] = []
-                            for item in v:
-                                out.extend(_flat(item))
-                            return out
-                        return [float(v)]
-                    r_flat, e_flat = _flat(ref_enc["pixel_values"]), _flat(exp_enc["pixel_values"])
-                    if len(r_flat) != len(e_flat) or any(abs(a - b) > 1e-4 for a, b in zip(r_flat, e_flat)):
-                        raise ValueError(f"{model_dir}: image processor pixel_values diverged from {reference_dir}")
+
+                def _flat(v: Any) -> list[float]:
+                    if hasattr(v, "flatten"):
+                        return [float(x) for x in v.flatten().tolist()]
+                    if isinstance(v, (list, tuple)):
+                        out: list[float] = []
+                        for item in v:
+                            out.extend(_flat(item))
+                        return out
+                    return [float(v)]
+
+                for probe_img in probe_imgs:
+                    ref_enc = ref_proc(text=[ref_p], images=[probe_img], return_tensors="pt")
+                    exp_enc = exp_proc(text=[exp_p], images=[probe_img], return_tensors="pt")
+                    ref_ids = ref_enc["input_ids"][0].tolist() if hasattr(ref_enc["input_ids"][0], "tolist") else list(ref_enc["input_ids"][0])
+                    exp_ids = exp_enc["input_ids"][0].tolist() if hasattr(exp_enc["input_ids"][0], "tolist") else list(exp_enc["input_ids"][0])
+                    if ref_ids != exp_ids:
+                        raise ValueError(f"{model_dir}: multimodal AutoProcessor input_ids diverged from {reference_dir}")
+                    if "pixel_values" in ref_enc and "pixel_values" in exp_enc:
+                        r_flat, e_flat = _flat(ref_enc["pixel_values"]), _flat(exp_enc["pixel_values"])
+                        if len(r_flat) != len(e_flat) or any(abs(a - b) > 1e-4 for a, b in zip(r_flat, e_flat)):
+                            raise ValueError(f"{model_dir}: image processor pixel_values diverged from {reference_dir}")
                 checked_fields["reference_image_parity"] = True
 
     return checked_fields

@@ -56,11 +56,12 @@ def test_all_competition_candidates_pass_policy() -> None:
     assert groups["lcprevcity_159_OBJ"]["hand_attributed"] == "true"
 
     col_groups = assign_revcity_item_groups(
-        ["apsrevcity%3A16255", "apsrevcity%3A16700", "apsrevcity%3A7228", "apsrevcity%3A7540"],
+        ["apsrevcity%3A16255", "apsrevcity%3A16700", "apsrevcity%3A7228", "apsrevcity%3A7540", "apsrevcity%3A14950", "apsrevcity%3A15229"],
         max_id_gap=30,
     )
     assert col_groups["apsrevcity%3A16255"]["document_id"] == col_groups["apsrevcity%3A16700"]["document_id"]
     assert col_groups["apsrevcity%3A7228"]["document_id"] == col_groups["apsrevcity%3A7540"]["document_id"]
+    assert col_groups["apsrevcity%3A14950"]["document_id"] == col_groups["apsrevcity%3A15229"]["document_id"]
 
 
 def test_resolve_vision_modules_across_model_families() -> None:

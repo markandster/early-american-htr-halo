@@ -188,6 +188,31 @@ def test_halo_export_helpers_and_dir_verifier(tmp_path: Path, monkeypatch: pytes
     with pytest.raises(ValueError, match="pixel_values diverged"):
         verify_exported_vlm_dir(ok_dir, reference_dir=ref_dir)
 
+    seen_probe_modes: list[str] = []
+    fake_pil_img.frombytes = lambda mode, size, data: types.SimpleNamespace(mode=mode, size=size)  # type: ignore[attr-defined]
+
+    class _ModeSensitiveProc:
+        def __init__(self, path: str) -> None:
+            self.is_exp = Path(path).name == "ok_mlx"
+
+        @classmethod
+        def from_pretrained(cls, path: str) -> "_ModeSensitiveProc":
+            return cls(path)
+
+        def apply_chat_template(self, msgs: object, tokenize: bool = False, add_generation_prompt: bool = True) -> str:
+            return "P"
+
+        def __call__(self, text: object, images: list, return_tensors: str = "pt") -> dict:
+            mode = getattr(images[0], "mode", "RGB")
+            seen_probe_modes.append(mode)
+            pix = [[0.5, 0.5]] if not (self.is_exp and mode != "RGB") else [[0.0, 0.0]]
+            return {"input_ids": [[1, 2]], "pixel_values": pix}
+
+    fake_tok_mod.AutoProcessor = _ModeSensitiveProc  # type: ignore[attr-defined]
+    with pytest.raises(ValueError, match="pixel_values diverged"):
+        verify_exported_vlm_dir(ok_dir, reference_dir=ref_dir)
+    assert "RGB" in seen_probe_modes and "L" in seen_probe_modes
+
 
 def test_merge_and_eval_cli_guards_and_rollout_manifest_refusal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo_root = Path(__file__).resolve().parents[1]

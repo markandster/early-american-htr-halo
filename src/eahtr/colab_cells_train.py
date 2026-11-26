@@ -353,6 +353,7 @@ def run_candidate_arm(cand_key: str, arm: str, arm_train_rows: list[dict], val_s
                 accum_count = 0
                 opt_step += 1
                 if globals().get('CHECKPOINT_EVERY_OPT_STEPS', 0) > 0 and opt_step % int(CHECKPOINT_EVERY_OPT_STEPS) == 0:
+                    # Manual salvage snapshot only (weights + processor; no optimizer/scheduler state or auto-resume)
                     model.save_pretrained(run_dir / 'adapter_last')
                     processor.save_pretrained(run_dir / 'adapter_last')
 

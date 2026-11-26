@@ -157,6 +157,7 @@ SMOKE_TEST_MODE = True
 # Available keys: ['gemma4_12b']
 CANDIDATE_KEYS = ['gemma4_12b']
 ARMS = ['baseline_zeroshot', 'real', 'sham_short']
+# Smoke mode matches `real` (128 pages); full-mode Colab `sham_short` is a short unmatched control (<= 512 pages); matched-compute sham runs in Halo.
 SHAM_MAX_PRESENTATIONS = 128 if SMOKE_TEST_MODE else 512
 CHECKPOINT_EVERY_OPT_STEPS = 50
 

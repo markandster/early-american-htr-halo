@@ -304,24 +304,49 @@ with torch.no_grad():
 probe_out.write_text(json.dumps(collected), encoding="utf-8")
 """
 probe_json = work / "configs" / "stage2_probe_lps.json"
+gate_fail_file = work / "configs" / "continuity_gate_failure.txt"
+if gate_fail_file.exists():
+    gate_fail_file.unlink()
 subprocess.check_call([sys.executable, "-c", stage2_probe, str(work), str(probe_json)])
 stage2_lps = json.loads(probe_json.read_text(encoding="utf-8"))
 base_tol = 0.05 if vram_gb >= 56.0 else 0.15
 s2_tol = min(0.15 if vram_gb >= 56.0 else 0.35, max(base_tol, 0.4 * sft_shift))
 stage2_vs_base_diff = max(abs(a - b) for a, b in zip(base_lps, stage2_lps))
-report = verify_stage_continuity_logprobs(base_lps, sft_lps, stage2_lps, tol=s2_tol)
+gate_errors = []
+try:
+    report = verify_stage_continuity_logprobs(base_lps, sft_lps, stage2_lps, tol=s2_tol)
+except Exception as exc:
+    report = {
+        "max_step0_diff": max(abs(a - b) for a, b in zip(sft_lps, stage2_lps)),
+        "sft_shift": sft_shift,
+    }
+    gate_errors.append(str(exc))
 if sft_shift < 2.0 * s2_tol:
     print(f"[WARN] Low Stage 2 continuity separation power: sft_shift={sft_shift:.6f} < 2*s2_tol ({2.0 * s2_tol:.6f})")
 if report["max_step0_diff"] > 0.05:
     print(f"[WARN] Stage 2 step-0 vs merged SFT max logit diff={report['max_step0_diff']:.6f} > 0.05 (tol={s2_tol:.6f}, sft_shift={sft_shift:.6f})")
-assert report["max_step0_diff"] < 0.5 * sft_shift and stage2_vs_base_diff >= 0.5 * sft_shift, (
-    f"Stage 2 continuity lacks power / fell back toward base (step0_diff={report['max_step0_diff']:.6f}, stage2_vs_base={stage2_vs_base_diff:.6f}, sft_shift={sft_shift:.6f})"
-)
+if stage2_vs_base_diff < 0.5 * sft_shift:
+    gate_errors.append(
+        f"Stage 2 step-0 fell back toward base weights (stage2_vs_base={stage2_vs_base_diff:.6f} < 0.5*sft_shift={0.5 * sft_shift:.6f}, sft_shift={sft_shift:.6f})."
+    )
+if report["max_step0_diff"] >= 0.5 * sft_shift:
+    gate_errors.append(
+        f"Stage 2 continuity lacks separation power or drifted past half the SFT shift (step0_diff={report['max_step0_diff']:.6f} >= 0.5*sft_shift={0.5 * sft_shift:.6f}, sft_shift={sft_shift:.6f}). Raise smoke max_steps (e.g. 10-20) or learning_rate if sft_shift is small relative to precision noise."
+    )
 report["s2_tol"] = round(s2_tol, 6)
 report["stage2_vs_base_diff"] = round(stage2_vs_base_diff, 6)
 report["live_vs_merged_diff"] = merge_diff
-print("Verified Stage 1->2 continuity (via Halo SMPOTrainer):", report)
+if gate_errors:
+    msg = " | ".join(gate_errors)
+    gate_fail_file.write_text(msg, encoding="utf-8")
+    print(f"[ERROR] Stage 2 continuity gate failed (continuing to smpo.py so 5-step SMPO evidence is still collected): {msg}", file=sys.stderr)
+else:
+    print("Verified Stage 1->2 continuity (via Halo SMPOTrainer):", report)
 PY
 
 HALO_FLEX_SLIDING="${FLEX_ENV}" "${SMOKE_VENV}/bin/python" "${HALO_DIR}/scripts/training/preference/smpo.py" "${WORK_DIR}/configs/smoke_vlm_smpo.yaml" 2>&1 | tee "${WORK_DIR}/configs/smpo_run.log"
 "${SMOKE_VENV}/bin/python" -c "from pathlib import Path; from eahtr.halo_smoke import verify_halo_run_log_finite_loss; print('SMPO losses:', verify_halo_run_log_finite_loss(Path('${WORK_DIR}/configs/smpo_run.log'), min_steps=5))"
+if [[ -f "${WORK_DIR}/configs/continuity_gate_failure.txt" ]]; then
+  echo "ERROR: Stage 2 continuity gate failed before smpo.py: $(cat "${WORK_DIR}/configs/continuity_gate_failure.txt")" >&2
+  exit 1
+fi
