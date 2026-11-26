@@ -218,10 +218,20 @@ if GENERATE_OFFLINE_GRPO_ROLLOUTS:
     model.eval()
 
     ROLLOUT_TEMPS = (0.3, 0.7, 0.7, 1.0)
-    if ROLLOUT_SPLIT == 'train':
-        print('[WARN] ROLLOUT_SPLIT=train draws Stage-2 rollouts from training pages; prefer out-of-fold / val rows.')
-    rollout_pool = all_records_by_split.get(ROLLOUT_SPLIT, val_rows)
-    rollout_rows = rollout_pool[:GRPO_ROLLOUT_PROMPTS]
+    trained_ids = {r['record_id'] for r in (pilot_train_rows if ('pilot_train_rows' in globals() and SMOKE_TEST_MODE) else train_rows)}
+    oof_rows = [r for r in train_rows if r['record_id'] not in trained_ids]
+    if oof_rows and ROLLOUT_SOURCE == 'oof_train':
+        rollout_rows = oof_rows[:GRPO_ROLLOUT_PROMPTS]
+        is_oof = True
+    elif ALLOW_IN_SAMPLE_TRAIN_ROLLOUTS:
+        print('[WARN] No held-out training fold rows remain; using in-sample train rows because ALLOW_IN_SAMPLE_TRAIN_ROLLOUTS=True.')
+        rollout_rows = train_rows[:GRPO_ROLLOUT_PROMPTS]
+        is_oof = False
+    else:
+        raise RuntimeError(
+            'Refusing in-sample Stage-2 rollouts without out-of-fold train rows (val/test_public stay strictly excluded); '
+            'set ALLOW_IN_SAMPLE_TRAIN_ROLLOUTS=True for smoke debugging or use out-of-fold shards with generate_halo_rollouts.py.'
+        )
     out_jsonl = OUTPUT_ROOT / f'{cand_key}_scored_offline_grpo_rollouts.jsonl'
     pref_jsonl = OUTPUT_ROOT / f'{cand_key}_vlm_preferences.jsonl'
     pref_records = []
@@ -267,8 +277,8 @@ if GENERATE_OFFLINE_GRPO_ROLLOUTS:
                 'completions': completions,
                 'finish_reasons': finish_reasons,
                 'max_new_tokens_cap': cap,
-                'split': row.get('split', ROLLOUT_SPLIT),
-                'is_out_of_fold': (ROLLOUT_SPLIT != 'train'),
+                'split': row.get('split', 'train'),
+                'is_out_of_fold': is_oof,
                 'source_checkpoint': str(merged_dir if merged_dir.is_dir() else adapter_dir),
             })
 

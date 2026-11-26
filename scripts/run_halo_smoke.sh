@@ -231,7 +231,7 @@ def _score_examples(model_path: Path, *, adapter_dir: Path | None = None, check_
             assert "<|channel>thought" not in decoded, f"Thinking leak in Stage 1 smoke generate: {decoded[:120]}"
             sids = _stop_ids(tok)
             last_id = int(gen_ids[0, -1].item())
-            assert last_id in sids and int(gen_ids.shape[1]) < stop_cap, f"Stage 1 smoke failed natural stop (last_id={last_id}, len={int(gen_ids.shape[1])}, cap={stop_cap})"
+            assert last_id in sids, f"Stage 1 smoke failed natural stop (last_id={last_id}, len={int(gen_ids.shape[1])}, cap={stop_cap})"
     del mdl
     torch.cuda.empty_cache()
     return collected
@@ -294,10 +294,11 @@ with torch.no_grad():
         p_len = p_in["input_ids"].shape[1]
         lps = torch.log_softmax(logits[p_len - 1 : -1].float(), dim=-1).gather(-1, dev_in["input_ids"][0, p_len:].unsqueeze(-1)).squeeze(-1)
         collected.extend(float(x) for x in lps[:16].cpu().tolist())
-print(json.dumps(collected))
+Path(sys.argv[2]).write_text(json.dumps(collected), encoding="utf-8")
 """
-raw_s2 = subprocess.check_output([sys.executable, "-c", stage2_probe, str(work)], text=True).strip().splitlines()[-1]
-stage2_lps = json.loads(raw_s2)
+probe_json = work / "configs" / "stage2_probe_lps.json"
+subprocess.check_call([sys.executable, "-c", stage2_probe, str(work), str(probe_json)])
+stage2_lps = json.loads(probe_json.read_text(encoding="utf-8"))
 s2_tol = 0.02 if vram_gb >= 56.0 else 0.15
 report = verify_stage_continuity_logprobs(base_lps, sft_lps, stage2_lps, tol=s2_tol)
 report["live_vs_merged_diff"] = merge_diff

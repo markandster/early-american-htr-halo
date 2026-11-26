@@ -25,7 +25,7 @@ This notebook mirrors our high-resolution, trainable-vision, sham-controlled tra
 """
 
 CELL_2_SETUP_SOURCE = """
-!pip install -q --upgrade transformers peft accelerate bitsandbytes rapidfuzz pyyaml tqdm
+!pip install -q "transformers==5.23.0" "peft==0.18.1" "accelerate>=1.11.0,<1.12.0" "bitsandbytes>=0.49.2,<0.50.0" "rapidfuzz>=3.9.0" "pyyaml>=6.0" "tqdm>=4.66"
 
 import csv
 import gc
@@ -72,10 +72,14 @@ if USE_GOOGLE_DRIVE:
 
 REPO_URL = 'https://github.com/markandster/early-american-htr-halo.git'
 REPO_DIR = Path('/content/early-american-htr-halo')
+PINNED_REPO_COMMIT = ''
 if not REPO_DIR.exists():
     subprocess.run(['git', 'clone', '--depth', '1', REPO_URL, str(REPO_DIR)], check=True)
 else:
     subprocess.run(['git', '-C', str(REPO_DIR), 'pull', '--ff-only'], check=True)
+if PINNED_REPO_COMMIT:
+    subprocess.run(['git', '-C', str(REPO_DIR), 'fetch', '--depth', '1', 'origin', PINNED_REPO_COMMIT], check=True)
+    subprocess.run(['git', '-C', str(REPO_DIR), 'checkout', PINNED_REPO_COMMIT], check=True)
 subprocess.run(['pip', 'install', '-q', '--no-deps', '-e', str(REPO_DIR)], check=True)
 REPO_GIT_SHA = subprocess.check_output(['git', '-C', str(REPO_DIR), 'rev-parse', '--short', 'HEAD'], text=True).strip()
 print(f'Repo commit: {REPO_GIT_SHA} | transformers={transformers.__version__}')
@@ -182,7 +186,8 @@ HF_DATASET_REPO_ID = 'markandster/early-american-htr-public'
 
 # Offline GRPO rollout generation (Cell 7)
 GENERATE_OFFLINE_GRPO_ROLLOUTS = False
-ROLLOUT_SPLIT = 'val'
+ROLLOUT_SOURCE = 'oof_train'
+ALLOW_IN_SAMPLE_TRAIN_ROLLOUTS = False
 GRPO_ROLLOUT_PROMPTS = 64
 GRPO_NUM_GENERATIONS = 4
 

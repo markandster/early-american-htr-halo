@@ -113,8 +113,8 @@ def test_assign_deterministic_split_groups_consistently() -> None:
     val_groups = [g for g, sp in balanced.items() if sp == "val"]
     test_groups = [g for g, sp in balanced.items() if sp == "test_public"]
     assert len(val_groups) >= 3 and len(test_groups) >= 3
-    assert len({stats[g]["institution"] for g in val_groups}) >= 2
-    assert len({stats[g]["institution"] for g in test_groups}) >= 2
+    assert {stats[g]["institution"] for g in val_groups} == {"hsp", "aps", "lcprevcity"}
+    assert {stats[g]["institution"] for g in test_groups} == {"hsp", "aps", "lcprevcity"}
 
 
 def test_should_use_4bit_across_gpus_and_arms() -> None:
@@ -196,7 +196,10 @@ def test_generated_notebook_valid_json_ast_and_public_only(tmp_path: Path) -> No
         "assign_balanced_group_splits",
         "REVCITY_ZENODO_MD5",
         "hard_case_held_out",
-        "ROLLOUT_SPLIT",
+        "ROLLOUT_SOURCE",
+        "ALLOW_IN_SAMPLE_TRAIN_ROLLOUTS",
+        "transformers==5.23.0",
+        "PINNED_REPO_COMMIT",
         "is_out_of_fold",
         "image_dhash",
     )

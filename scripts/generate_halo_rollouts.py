@@ -23,13 +23,24 @@ def main() -> int:
     parser.add_argument("--k", type=int, default=4)
     parser.add_argument("--full-train-count", type=int, default=3000, help="Count for throughput/GPU-hour estimate")
     parser.add_argument("--min-reward-margin", type=float, default=0.05)
+    parser.add_argument("--source-fold", default="oof", help="Fold tag recorded for preference provenance")
+    parser.add_argument("--allow-eval-split", action="store_true", help="Allow val/test manifests explicitly (not for Stage-2 train export)")
     args = parser.parse_args()
 
+    import sys
     import torch
     from PIL import Image
     from transformers import AutoModelForImageTextToText, AutoProcessor
 
     rows = [json.loads(line) for line in args.train_jsonl.read_text(encoding="utf-8").splitlines() if line.strip()]
+    has_eval_rows = any(str(r.get("split", "")).lower() in ("val", "validation", "test", "test_public") for r in rows)
+    has_eval_name = any(tok in args.train_jsonl.name.lower() for tok in ("val", "test"))
+    if (has_eval_rows or has_eval_name) and not args.allow_eval_split:
+        print(
+            f"Refusing eval/test manifest {args.train_jsonl} for Stage-2 rollout generation (prevents eval leakage); pass out-of-fold train shards or --allow-eval-split.",
+            file=sys.stderr,
+        )
+        return 2
     if args.max_prompts:
         rows = rows[: args.max_prompts]
 
@@ -64,7 +75,7 @@ def main() -> int:
             "image_sha256": row.get("image_sha256", ""), "image_dhash": row.get("image_dhash", ""),
             "image_path": row["image_path"], "prompt": DIPLOMATIC_PROMPT, "text": row["text"],
             "completions": comps, "finish_reasons": frs, "max_new_tokens_cap": cap,
-            "split": row.get("split", "train"), "source_checkpoint": str(args.model_dir),
+            "split": row.get("split", "train"), "source_fold": args.source_fold, "source_checkpoint": str(args.model_dir),
         })
 
     elapsed = max(0.01, time.time() - t0)

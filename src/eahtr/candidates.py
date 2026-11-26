@@ -200,7 +200,7 @@ def assign_balanced_group_splits(
 
     counts = {"val": 0, "test_public": 0}
     inst_order = sorted(queues)
-    turn = "test_public"
+    inst_turn = {inst: ("test_public" if i % 2 == 0 else "val") for i, inst in enumerate(inst_order)}
     progressed = True
     while progressed and (counts["val"] < val_target or counts["test_public"] < test_target):
         progressed = False
@@ -211,14 +211,15 @@ def assign_balanced_group_splits(
             progressed = True
             need_test = counts["test_public"] < test_target
             need_val = counts["val"] < val_target
-            if need_test and (turn == "test_public" or not need_val):
+            pref = inst_turn[inst]
+            if (pref == "test_public" and need_test) or (need_test and not need_val):
                 assignments[gid] = "test_public"
                 counts["test_public"] += pages
-                turn = "val"
+                inst_turn[inst] = "val"
             elif need_val:
                 assignments[gid] = "val"
                 counts["val"] += pages
-                turn = "test_public"
+                inst_turn[inst] = "test_public"
             else:
                 assignments[gid] = "train"
     for inst_q in queues.values():
