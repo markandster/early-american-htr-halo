@@ -6,7 +6,9 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import sys
 
+from eahtr.candidates import make_sham_derangement
 from eahtr.halo_export import export_halo_vlm_preference_dataset, export_halo_vlm_sft_dataset
 from eahtr.revcity_build import resolve_manifest_image_path
 from eahtr.vision_budget import measure_max_vision_tokens, parse_cell_size
@@ -53,7 +55,13 @@ def main() -> int:
     parser.add_argument("--cell-size", default=None, help="Optional pixel grid cell size 'W,H' or 'N' (auto-detected from staged processor_config.json when omitted)")
     parser.add_argument("--image-format", choices=("PNG", "JPEG"), default="PNG")
     parser.add_argument("--measure-vision-tokens", action="store_true", help="Measure realized image tokens across up to 8 sample images using AutoProcessor")
+    parser.add_argument("--sham", action="store_true", help="Derange train transcripts across pages via make_sham_derangement for matched-compute Halo sham control (sft mode only)")
+    parser.add_argument("--sham-seed", type=int, default=20261125)
     args = parser.parse_args()
+
+    if args.sham and args.mode != "sft":
+        print("[ERROR] --sham is only supported in --mode sft.", file=sys.stderr)
+        return 2
 
     from transformers import AutoTokenizer
 
@@ -61,6 +69,10 @@ def main() -> int:
     tok = AutoTokenizer.from_pretrained(args.tokenizer, **tok_kw)
     count_fn = lambda s: len(tok(s, add_special_tokens=False)["input_ids"])
     train_rows = _resolve_row_paths(_load_jsonl(args.train_jsonl), args.train_jsonl, args.image_root)
+    if args.sham:
+        train_rows = make_sham_derangement(train_rows, seed=args.sham_seed)
+        if any(r.get("sham_donor_record_id") == r.get("record_id") for r in train_rows):
+            raise RuntimeError("Sham derangement produced a self-matched record.")
     val_rows = _resolve_row_paths(_load_jsonl(args.val_jsonl), args.val_jsonl, args.image_root)
     cell_size = parse_cell_size(args.cell_size, args.tokenizer)
 
@@ -100,6 +112,9 @@ def main() -> int:
             cell_size=cell_size,
             image_format=args.image_format,
         )
+    if args.sham:
+        res["sham"] = True
+        res["sham_seed"] = args.sham_seed
     print(json.dumps(res, indent=2))
     return 0
 

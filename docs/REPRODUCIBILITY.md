@@ -93,6 +93,20 @@ python scripts/export_halo_datasets.py \
   --out-dir data/halo_vlm_sft \
   --tokenizer checkpoints/gemma4-12b-highres-1120 \
   --max-length 4096 --vision-tokens 1120
+
+# Matched-compute Halo sham control (deranged train transcripts; val remains unpermuted):
+python scripts/export_halo_datasets.py \
+  --mode sft --sham \
+  --train-jsonl data/revcity/manifests/train.jsonl \
+  --val-jsonl data/revcity/manifests/val.jsonl \
+  --out-dir data/halo_vlm_sft_sham \
+  --tokenizer checkpoints/gemma4-12b-highres-1120 \
+  --max-length 4096 --vision-tokens 1120
+
+# Optional standalone eval-only LOC By the People genre-shift panel (never mixed into training):
+python scripts/build_loc_challenge.py \
+  --out-dir data/loc_btp --max-pages 150 \
+  --revcity-manifests-dir data/revcity/manifests
 ```
 
 ### Step D — Stage 1 Gemma 4 Halo SFT & Parity Export (`12b`, `26b_a4b`, `31b`)
@@ -175,16 +189,26 @@ python scripts/merge_and_eval_halo.py \
   --baseline-predictions results/val_zeroshot.json \
   --out-json results/val_sft_reppen.json \
   --repetition-penalty 1.1
+
+# 4. Per-page diagnostic error analysis (word-aligned line-break drift, loop/cap buckets, two-page openings)
+python scripts/analyze_eval_predictions.py \
+  --predictions results/val_sft.json \
+  --baseline results/val_zeroshot.json \
+  --manifest manifests/val.jsonl
 ```
 
 ### Step F — Conditional Stage 2 VLM SMPO (Out-of-Fold Rollouts Only)
 
-Run Stage 2 only if Stage 1 validation failure rate justifies preference optimization (see [docs/TRAINING_PLAN.md](TRAINING_PLAN.md)). Because `generate_halo_rollouts.py` verifies `split == "train"` on `--train-jsonl`, true **out-of-fold** rollouts require first training fold-held-out Stage 1 models (`OOF_NUM_FOLDS > 1`, e.g. excluding `manifests/oof_fold0_train.jsonl`) and passing each held-out Stage 1 checkpoint rather than sampling from a Stage 1 model trained on all of `train`. To monitor SMPO loss cleanly without leaking into training, build `data/pref_val.jsonl` only from `manifests/val.jsonl` with `--allow-eval-split` (never passed to `--train-jsonl`):
+Run Stage 2 only if Stage 1 validation failure rate justifies preference optimization (see [docs/TRAINING_PLAN.md](TRAINING_PLAN.md)). Because `generate_halo_rollouts.py` verifies `split == "train"` on `--train-jsonl`, true **out-of-fold** rollouts require first partitioning `train.jsonl` via `scripts/build_oof_folds.py`, training each fold-held-out Stage 1 model on `oof_fold{k}_train.jsonl`, and passing that fold's held-out checkpoint against `oof_fold{k}_holdout.jsonl` rather than sampling from a Stage 1 model trained on those pages. To monitor SMPO loss cleanly without leaking into training, build `data/pref_val.jsonl` only from `manifests/val.jsonl` with `--allow-eval-split` (never passed to `--train-jsonl`):
 
 ```bash
+python scripts/build_oof_folds.py \
+  --train-jsonl data/revcity/manifests/train.jsonl \
+  --out-dir data/revcity/manifests/oof --num-folds 4
+
 python scripts/generate_halo_rollouts.py \
   --model-dir checkpoints/gemma4-12b-eahtr-sft-oof0-merged \
-  --train-jsonl manifests/oof_fold0_train.jsonl \
+  --train-jsonl data/revcity/manifests/oof/oof_fold0_holdout.jsonl \
   --out-pref-jsonl data/pref_train.jsonl \
   --out-rollouts-jsonl data/raw_rollouts.jsonl \
   --source-fold fold0
@@ -235,7 +259,8 @@ python scripts/merge_and_eval_halo.py \
   --out-json results/test_public_final.json \
   --dual-convention
 
-# Optional local 8-bit MLX conversion + 1120-token / pixel / template parity verification:
+# Optional local 8-bit MLX conversion + 1120-token / pixel / template parity verification
+# (verified against mlx 0.32.5 + mlx-vlm 0.8.1 native `gemma4_unified` support):
 python -m mlx_vlm convert --hf-path checkpoints/gemma4-12b-eahtr-final-merged --mlx-path mlx_out -q --q-bits 8
 python scripts/verify_mlx_export.py mlx_out --reference-dir checkpoints/gemma4-12b-eahtr-final-merged
 ```

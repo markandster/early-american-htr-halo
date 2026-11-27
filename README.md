@@ -75,12 +75,18 @@ See [docs/TRAINING_PLAN.md](docs/TRAINING_PLAN.md) for the full competition trai
 │   └── colab_halo_smoke.ipynb                # Pre-competition 1x GPU 5-step Halo smoke notebook
 ├── results/                      # Held-out evaluation & ablation ledger
 ├── scripts/
+│   ├── build_revcity_manifests.py # Standalone RevCity download, cleaning, splitting & audit CLI
+│   ├── build_loc_challenge.py    # Standalone LOC By the People challenge manifest builder
+│   ├── build_oof_folds.py        # Group-disjoint K-fold OOF manifest generator for Stage 2
 │   ├── validate_halo_configs.py  # Two-tier Halo config validator (CI + --halo-repo CPU Tier-2)
 │   ├── stage_gemma4_highres.py   # Writable config + symlinked weight 1120-token Gemma 4 staging
-│   ├── export_halo_datasets.py   # Post-expansion VLM Arrow DatasetDict exporter
+│   ├── export_halo_datasets.py   # Post-expansion VLM Arrow DatasetDict exporter (--sham supported)
 │   ├── run_halo_smoke.sh         # Clean-room Python 3.12 1x GPU SFT + merge + continuity + SMPO smoke
-│   ├── run_gemma4_halo.sh        # Canonical Gemma 4 12B Halo launcher & post-train merge/verify
+│   ├── run_gemma4_halo.sh        # Canonical Gemma 4 12B/26B-A4B/31B Halo launcher & export/verify
+│   ├── run_inkling2_halo.sh      # Conditional Inkling-2-Small EP=8 pilot launcher & adapter export
 │   ├── merge_and_eval_halo.py    # Halo adapter merge & frozen single-run val/test evaluator
+│   ├── eval_vllm_server.py       # Serving client for Halo vLLM LoRA adapter evaluation & image-swap
+│   ├── analyze_eval_predictions.py # Diagnostic CLI for line-break drift & loop/cap failure buckets
 │   ├── generate_halo_rollouts.py # OOF-guarded Stage 1 K=4 rollout sampler & GPU-hour estimator
 │   └── verify_mlx_export.py      # Hardened multimodal Jinja2/token-parity & 1120-token export verifier
 ├── src/eahtr/                    # Modular Apache-2.0 Python package (<= 450 lines/module)
