@@ -18,3 +18,12 @@ Every reported evaluation records:
 | `google/gemma-4-12B-it` | Stage 2 VLM SMPO (Conditional) | `revcity-val` / frozen `test_public` | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | Merged Stage 1 start + `chosen_sft_ratio: 1.0`; promoted only if `val` improves |
 | `google/gemma-4-12B-it` | LOC Genre-Shift Challenge | `challenge_loc` | _pending_ | _pending_ | — | _pending_ | _pending_ | — | Out-of-distribution Public Domain panel |
 | `thinkingmachines/Inkling-2-Small` | Conditional Image Pilot | `revcity-val` | _conditional_ | _conditional_ | _conditional_ | _conditional_ | _conditional_ | Excluded (>24 GB MLX) | Frozen-vision Stage 1 SFT (Stage 2 SMPO only if expert-shard reload is proven) pending Dec 1 EP=8 memory & serving check |
+
+## Pre-Competition Colab Smoke Pilot (24 GB L4, 124 Train / 24 Val Pages)
+
+| Model | Stage / Arm | Strict WER / CER | Lenient / Raw Strict CER | Newline CER / Line-Boundary F1 / Order-Tol CER | Image-Swap Δ (16 pages) | Loop / Cap / Non-Term | Editorial / Mod / Thinking Leaks | Mean Reward | Notes |
+|---|---|---|---|---|---|---|---|---|---|
+| `google/gemma-4-12B-it` | `baseline_zeroshot` | `159.99%` / `151.79%` | `103.03%` / `149.43%` | — | — | `7/24` / `8/24` / — | — / — / `0/24` | `-0.1715` | 24 stratified `val` pages; `1,120` soft tokens |
+| `google/gemma-4-12B-it` | `ARM=real` QLoRA smoke (`main@89af415`) | `57.35%` / `38.12%` | `33.98%` / `37.80%` | `38.69%` / `14.84%` / `35.89%` | `+79.75 pp` (`swap CER 117.01%`) | `2/24` / `2/24` / `2/24` | `0` / `0` / `0` | `0.5595` | `124/124` pages, `0` OOMs (`10m55s`), `1,066` image tokens, trainable `model.embed_vision` |
+
+Diagnostic note: `line_boundary_f1_pct=14.84%` and `2/24` loop/capped pages on this 124-page smoke are primary targets for pre-competition error analysis, full-corpus (`2,897`-page) training, and Stage 2 SMPO / repetition-penalty gating.
