@@ -20,9 +20,6 @@ from eahtr.vision_budget import (
     resize_image_for_token_budget,
 )
 
-HAS_PIL = importlib.util.find_spec("PIL") is not None
-HAS_DATASETS = importlib.util.find_spec("datasets") is not None
-
 
 def test_read_image_cell_size_and_grid_token_math(tmp_path: Path) -> None:
     proc_dir = tmp_path / "inkling"
@@ -162,19 +159,19 @@ def test_measure_max_vision_tokens_uses_proc_image_token_id_and_fails_closed(
     with pytest.raises(ValueError, match="0 image tokens"):
         measure_max_vision_tokens([img_p], mdl, max_image_tokens=16)
 
-    if HAS_PIL:
-        # Undo PIL/transformers mocks before importing real Pillow in full venv
-        monkeypatch.undo()
-        from PIL import Image as RealImage
 
-        im = RealImage.new("RGB", (3000, 4000), (240, 235, 220))
-        resized_real, toks_real = resize_image_for_token_budget(im, max_image_tokens=2000, cell_w=40, cell_h=40)
-        assert resized_real.size[0] % 40 == 0 and resized_real.size[1] % 40 == 0
-        assert (resized_real.size[0] // 40) * (resized_real.size[1] // 40) == toks_real <= 2000
-        blob_real, w_r, h_r, etoks_r = encode_image_for_vlm(
-            im, max_image_tokens=2000, cell_w=40, cell_h=40, image_format="PNG"
-        )
-        assert blob_real.startswith(b"\x89PNG") and (w_r, h_r, etoks_r) == (resized_real.size[0], resized_real.size[1], toks_real)
+def test_real_pillow_exact_cell_multiples_and_png_encoding() -> None:
+    pytest.importorskip("PIL")
+    from PIL import Image as RealImage
+
+    im = RealImage.new("RGB", (3000, 4000), (240, 235, 220))
+    resized_real, toks_real = resize_image_for_token_budget(im, max_image_tokens=2000, cell_w=40, cell_h=40)
+    assert resized_real.size[0] % 40 == 0 and resized_real.size[1] % 40 == 0
+    assert (resized_real.size[0] // 40) * (resized_real.size[1] // 40) == toks_real <= 2000
+    blob_real, w_r, h_r, etoks_r = encode_image_for_vlm(
+        im, max_image_tokens=2000, cell_w=40, cell_h=40, image_format="PNG"
+    )
+    assert blob_real.startswith(b"\x89PNG") and (w_r, h_r, etoks_r) == (resized_real.size[0], resized_real.size[1], toks_real)
 
 
 def test_streaming_export_with_budget_and_cli_image_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -346,53 +343,57 @@ def test_streaming_export_with_budget_and_cli_image_root(tmp_path: Path, monkeyp
     assert exp_cli.main() == 0
     assert seen_vis_arg == [1120]
 
-    if HAS_PIL and HAS_DATASETS:
-        monkeypatch.undo()
-        from PIL import Image as RealImage
-        from datasets import load_from_disk
-        from eahtr.halo_export import export_halo_vlm_preference_dataset, export_halo_vlm_sft_dataset
 
-        real_dir = tmp_path / "real_2400x3200"
-        real_dir.mkdir()
-        src_tr = real_dir / "tr.jpg"
-        src_va = real_dir / "va.jpg"
-        RealImage.new("RGB", (2400, 3200), (220, 210, 190)).save(src_tr, format="JPEG")
-        RealImage.new("RGB", (2400, 3200), (210, 200, 180)).save(src_va, format="JPEG")
+def test_real_pillow_and_datasets_resized_arrow_export(tmp_path: Path) -> None:
+    pytest.importorskip("PIL")
+    pytest.importorskip("datasets")
+    from PIL import Image as RealImage
+    from datasets import load_from_disk
+    from eahtr.halo_export import export_halo_vlm_preference_dataset, export_halo_vlm_sft_dataset
 
-        sft_ds_dir = real_dir / "sft_ds"
-        sft_meta = export_halo_vlm_sft_dataset(
-            [{"record_id": "rt1", "document_id": "rd1", "writer_key": "rw1", "image_sha256": "rs1", "image_path": str(src_tr), "text": "Dear Sir"}],
-            [{"record_id": "rv1", "document_id": "rd2", "writer_key": "rw2", "image_sha256": "rs2", "image_path": str(src_va), "text": "Madam"}],
-            sft_ds_dir,
-            lambda s: len(s.split()),
-            max_image_tokens=1120,
-        )
-        assert "pillow_runtime" in sft_meta and sft_meta["pillow_runtime"]["resample_filter"] == "LANCZOS"
-        loaded_sft = load_from_disk(str(sft_ds_dir))
-        assert loaded_sft["train"][0]["images"][0].size == (1120, 1520)
+    real_dir = tmp_path / "real_2400x3200"
+    real_dir.mkdir()
+    src_tr = real_dir / "tr.jpg"
+    src_va = real_dir / "va.jpg"
+    RealImage.new("RGB", (2400, 3200), (220, 210, 190)).save(src_tr, format="JPEG")
+    RealImage.new("RGB", (2400, 3200), (210, 200, 180)).save(src_va, format="JPEG")
 
-        pref_ds_dir = real_dir / "pref_ds"
-        pref_meta = export_halo_vlm_preference_dataset(
-            [{
-                "record_id": "rpt1", "document_id": "rd1", "writer_key": "rw1", "image_sha256": "rs1",
-                "split": "train", "images": [str(src_tr)],
-                "prompt": [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": "Transcribe."}]}],
-                "chosen": [{"role": "assistant", "content": "Dear Sir"}],
-                "rejected": [{"role": "assistant", "content": "Bad"}],
-                "margin": 0.8,
-            }],
-            [{
-                "record_id": "rpv1", "document_id": "rd2", "writer_key": "rw2", "image_sha256": "rs2",
-                "split": "val", "images": [str(src_va)],
-                "prompt": [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": "Transcribe."}]}],
-                "chosen": [{"role": "assistant", "content": "Madam"}],
-                "rejected": [{"role": "assistant", "content": "Bad"}],
-                "margin": 0.6,
-            }],
-            pref_ds_dir,
-            lambda s: len(s.split()),
-            max_image_tokens=1120,
-        )
-        assert "pillow_runtime" in pref_meta
-        loaded_pref = load_from_disk(str(pref_ds_dir))
-        assert loaded_pref["train"][0]["images"][0].size == (1120, 1520)
+    sft_ds_dir = real_dir / "sft_ds"
+    sft_meta = export_halo_vlm_sft_dataset(
+        [{"record_id": "rt1", "document_id": "rd1", "writer_key": "rw1", "image_sha256": "rs1", "image_path": str(src_tr), "text": "Dear Sir"}],
+        [{"record_id": "rv1", "document_id": "rd2", "writer_key": "rw2", "image_sha256": "rs2", "image_path": str(src_va), "text": "Madam"}],
+        sft_ds_dir,
+        lambda s: len(s.split()),
+        max_image_tokens=1120,
+    )
+    assert "pillow_runtime" in sft_meta and sft_meta["pillow_runtime"]["resample_filter"] == "LANCZOS"
+
+    pref_ds_dir = real_dir / "pref_ds"
+    pref_meta = export_halo_vlm_preference_dataset(
+        [{
+            "record_id": "rpt1", "document_id": "rd1", "writer_key": "rw1", "image_sha256": "rs1",
+            "split": "train", "images": [str(src_tr)],
+            "prompt": [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": "Transcribe."}]}],
+            "chosen": [{"role": "assistant", "content": "Dear Sir"}],
+            "rejected": [{"role": "assistant", "content": "Bad"}],
+            "margin": 0.8,
+        }],
+        [{
+            "record_id": "rpv1", "document_id": "rd2", "writer_key": "rw2", "image_sha256": "rs2",
+            "split": "val", "images": [str(src_va)],
+            "prompt": [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": "Transcribe."}]}],
+            "chosen": [{"role": "assistant", "content": "Madam"}],
+            "rejected": [{"role": "assistant", "content": "Bad"}],
+            "margin": 0.6,
+        }],
+        pref_ds_dir,
+        lambda s: len(s.split()),
+        max_image_tokens=1120,
+    )
+    assert "pillow_runtime" in pref_meta
+
+    # Remove source JPEGs to prove Arrow datasets embedded resized bytes independently
+    src_tr.unlink()
+    src_va.unlink()
+    assert load_from_disk(str(sft_ds_dir))["train"][0]["images"][0].size == (1120, 1520)
+    assert load_from_disk(str(pref_ds_dir))["train"][0]["images"][0].size == (1120, 1520)
