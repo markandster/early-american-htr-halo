@@ -183,7 +183,7 @@ def test_generated_notebook_valid_json_ast_and_public_only(tmp_path: Path) -> No
         "_assign_balanced_folds",
         "CHECKPOINT_EVERY_OPT_STEPS",
         "hard_case_panel",
-        "USE_GOOGLE_DRIVE",
+        "USE_GOOGLE_DRIVE = False",
         "llm_int8_skip_modules",
         "gradient_checkpointing_kwargs",
         "use_reentrant",

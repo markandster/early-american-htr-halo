@@ -67,7 +67,7 @@ from transformers import (
 AutoModelForMultimodalLM = getattr(transformers, 'AutoModelForMultimodalLM', None)
 from peft import LoraConfig, PeftModel, get_peft_model, prepare_model_for_kbit_training
 
-USE_GOOGLE_DRIVE = True
+USE_GOOGLE_DRIVE = False  # Set True for full multi-hour runs to persist outputs to Drive; False skips OAuth on smoke runs.
 if USE_GOOGLE_DRIVE:
     try:
         from google.colab import drive
