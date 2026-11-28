@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from .hygiene import audit_split_disjointness
-from .revcity_build import write_jsonl_atomic
+from .revcity_build import resolve_manifest_image_path, write_jsonl_atomic
 
 _FORBIDDEN_NAME_PARTS = ("val", "test", "challenge", "hard_case")
 
@@ -51,6 +52,19 @@ def assign_balanced_folds(
     return fold_map
 
 
+def _rebase_row_image_path(row: Mapping[str, Any], src_manifest: Path, out_dir: Path) -> dict[str, Any]:
+    """Rebase relative manifest image_path values so OOF shards resolve cleanly from out_dir."""
+    copied = dict(row)
+    raw_path = str(copied.get("image_path") or "").strip()
+    if raw_path and not Path(raw_path).is_absolute():
+        try:
+            target = resolve_manifest_image_path(raw_path, src_manifest, None)
+        except FileNotFoundError:
+            target = (src_manifest.parent / raw_path).resolve()
+        copied["image_path"] = os.path.relpath(target, out_dir.resolve()).replace(os.sep, "/")
+    return copied
+
+
 def build_oof_fold_manifests(
     train_jsonl: Path,
     out_dir: Path,
@@ -74,8 +88,8 @@ def build_oof_fold_manifests(
     out_dir.mkdir(parents=True, exist_ok=True)
     fold_summaries: list[dict[str, Any]] = []
     for k in range(num_folds):
-        fold_train = [r for r in rows if fold_map[fold_key(r)] != k]
-        fold_holdout = [r for r in rows if fold_map[fold_key(r)] == k]
+        fold_train = [_rebase_row_image_path(r, train_jsonl, out_dir) for r in rows if fold_map[fold_key(r)] != k]
+        fold_holdout = [_rebase_row_image_path(r, train_jsonl, out_dir) for r in rows if fold_map[fold_key(r)] == k]
         audit = audit_split_disjointness(fold_train, fold_holdout, ngram_size=32, max_dhash_distance=4)
         if not audit["passed"]:
             raise AssertionError(f"OOF fold {k} leakage detected: {audit}")

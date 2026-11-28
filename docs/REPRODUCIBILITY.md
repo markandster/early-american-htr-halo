@@ -109,9 +109,11 @@ python scripts/build_loc_challenge.py \
   --revcity-manifests-dir data/revcity/manifests
 ```
 
+> **Cloud Pod Transfer vs. Gigabit Rebuild:** On a Linux cloud pod with gigabit networking, re-downloading Zenodo `15776323` and rebuilding manifests + Arrow caches (`Step C`) on local NVMe takes only a few minutes (verify manifest determinism via `sha256sum -c`). If `rsync`ing pre-built data from macOS instead, pass `--exclude '._*' --exclude '.DS_Store'` to omit AppleDouble sidecar files.
+
 ### Step D — Stage 1 Gemma 4 Halo SFT & Parity Export (`12b`, `26b_a4b`, `31b`)
 
-First run pre-flight pod readiness verification (GPU VRAM/driver, free NVMe disk, Python versions, Tier-2 Halo config check, and staged Arrow datasets/manifests):
+First run pre-flight pod readiness verification (GPU VRAM/driver, free NVMe disk, Python versions, Tier-2 Halo config check, and staged Arrow datasets/manifests). To run the 5-step `>= 56 GiB` BF16 smoke cleanly via serverless Modal before Dec 1 (`A100-80GB` or `H100`), run `modal run scripts/modal_halo_smoke.py --gpu A100-80GB`:
 
 ```bash
 python scripts/preflight_pod.py \
@@ -171,17 +173,17 @@ python scripts/eval_vllm_server.py \
 ### Step E — Validation Eval, Image-Swap Causal Check & Repetition-Penalty Baseline
 
 ```bash
-# 0. Zero-shot baseline on val (produces results/val_zeroshot.json; repeat post-freeze with --allow-frozen-test on manifests/test_public.jsonl for results/test_zeroshot.json)
+# 0. Zero-shot baseline on val (produces results/val_zeroshot.json; repeat post-freeze with --allow-frozen-test on data/revcity/manifests/test_public.jsonl for results/test_zeroshot.json)
 python scripts/merge_and_eval_halo.py \
   --model-dir checkpoints/gemma4-12b-highres-1120 \
-  --eval-jsonl manifests/val.jsonl \
+  --eval-jsonl data/revcity/manifests/val.jsonl \
   --out-json results/val_zeroshot.json \
   --dual-convention
 
 # 1. Stage 1 validation score (dual-convention + newline/order metrics + clustered bootstrap CI)
 python scripts/merge_and_eval_halo.py \
   --model-dir checkpoints/gemma4-12b-eahtr-sft-merged \
-  --eval-jsonl manifests/val.jsonl \
+  --eval-jsonl data/revcity/manifests/val.jsonl \
   --baseline-predictions results/val_zeroshot.json \
   --out-json results/val_sft.json \
   --dual-convention
@@ -189,14 +191,14 @@ python scripts/merge_and_eval_halo.py \
 # 2. Same-checkpoint image-swap visual-grounding check
 python scripts/merge_and_eval_halo.py \
   --model-dir checkpoints/gemma4-12b-eahtr-sft-merged \
-  --eval-jsonl manifests/val.jsonl \
+  --eval-jsonl data/revcity/manifests/val.jsonl \
   --out-json results/val_sft_swap.json \
   --swap-images
 
 # 3. Decode-time repetition-penalty baseline (benchmark Stage 2 SMPO against this + continued gold SFT)
 python scripts/merge_and_eval_halo.py \
   --model-dir checkpoints/gemma4-12b-eahtr-sft-merged \
-  --eval-jsonl manifests/val.jsonl \
+  --eval-jsonl data/revcity/manifests/val.jsonl \
   --baseline-predictions results/val_zeroshot.json \
   --out-json results/val_sft_reppen.json \
   --repetition-penalty 1.1
@@ -205,12 +207,12 @@ python scripts/merge_and_eval_halo.py \
 python scripts/analyze_eval_predictions.py \
   --predictions results/val_sft.json \
   --baseline results/val_zeroshot.json \
-  --manifest manifests/val.jsonl
+  --manifest data/revcity/manifests/val.jsonl
 ```
 
 ### Step F — Conditional Stage 2 VLM SMPO (Out-of-Fold Rollouts Only)
 
-Run Stage 2 only if Stage 1 validation failure rate justifies preference optimization (see [docs/TRAINING_PLAN.md](TRAINING_PLAN.md)). Because `generate_halo_rollouts.py` verifies `split == "train"` on `--train-jsonl`, true **out-of-fold** rollouts require first partitioning `train.jsonl` via `scripts/build_oof_folds.py`, training each fold-held-out Stage 1 model on `oof_fold{k}_train.jsonl`, and passing that fold's held-out checkpoint against `oof_fold{k}_holdout.jsonl` rather than sampling from a Stage 1 model trained on those pages. To monitor SMPO loss cleanly without leaking into training, build `data/pref_val.jsonl` only from `manifests/val.jsonl` with `--allow-eval-split` (never passed to `--train-jsonl`):
+Run Stage 2 only if Stage 1 validation failure rate justifies preference optimization (see [docs/TRAINING_PLAN.md](TRAINING_PLAN.md)). Because `generate_halo_rollouts.py` verifies `split == "train"` on `--train-jsonl`, true **out-of-fold** rollouts require first partitioning `train.jsonl` via `scripts/build_oof_folds.py`, training each fold-held-out Stage 1 model on `oof_fold{k}_train.jsonl`, and passing that fold's held-out checkpoint against `oof_fold{k}_holdout.jsonl` rather than sampling from a Stage 1 model trained on those pages. To monitor SMPO loss cleanly without leaking into training, build `data/pref_val.jsonl` only from `data/revcity/manifests/val.jsonl` with `--allow-eval-split` (never passed to `--train-jsonl`):
 
 ```bash
 python scripts/build_oof_folds.py \
@@ -228,12 +230,12 @@ python scripts/generate_halo_rollouts.py \
 python scripts/merge_oof_preferences.py \
   --inputs data/pref_fold0.jsonl data/pref_fold1.jsonl data/pref_fold2.jsonl data/pref_fold3.jsonl \
   --out-jsonl data/pref_train.jsonl \
-  --eval-manifests manifests/val.jsonl manifests/test_public.jsonl \
+  --eval-manifests data/revcity/manifests/val.jsonl data/revcity/manifests/test_public.jsonl \
   --out-summary data/pref_train_audit.json
 
 python scripts/generate_halo_rollouts.py \
   --model-dir checkpoints/gemma4-12b-eahtr-sft-merged \
-  --train-jsonl manifests/val.jsonl \
+  --train-jsonl data/revcity/manifests/val.jsonl \
   --allow-eval-split \
   --out-pref-jsonl data/pref_val.jsonl \
   --source-fold val
@@ -271,13 +273,14 @@ python /tmp/halo/scripts/after_training/merge_peft_adapters.py \
 # Run ONCE only after locking final checkpoint and decoding parameters:
 python scripts/merge_and_eval_halo.py \
   --model-dir checkpoints/gemma4-12b-eahtr-final-merged \
-  --eval-jsonl manifests/test_public.jsonl \
+  --eval-jsonl data/revcity/manifests/test_public.jsonl \
   --allow-frozen-test \
   --baseline-predictions results/test_zeroshot.json \
   --out-json results/test_public_final.json \
   --dual-convention
 
 # Optional local 8-bit MLX conversion + 1120-token / pixel / template parity verification
+# Requires ~37 GiB free disk to hold merged BF16 (~24 GiB) alongside 8-bit MLX output (<= 12.5 GiB):
 # (verified against mlx 0.32.5 + mlx-vlm 0.8.1 native `gemma4_unified` support):
 python -m mlx_vlm convert --hf-path checkpoints/gemma4-12b-eahtr-final-merged --mlx-path mlx_out -q --q-bits 8
 python scripts/verify_mlx_export.py mlx_out --reference-dir checkpoints/gemma4-12b-eahtr-final-merged

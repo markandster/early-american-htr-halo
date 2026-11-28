@@ -26,6 +26,7 @@ def _sample_train_rows() -> list[dict]:
                     "writer_key": f"doc:{doc_idx}",
                     "writer_attributed": False,
                     "image_sha256": f"sha-{rid}",
+                    "image_path": f"../pages/{rid}.jpg",
                     "text": f"Unique manuscript line {rid} for testing disjointness with enough distinct words.",
                     "split": "train",
                 }
@@ -35,18 +36,24 @@ def _sample_train_rows() -> list[dict]:
 
 def test_build_oof_fold_manifests_balances_groups_and_audits_disjointness(tmp_path: Path) -> None:
     rows = _sample_train_rows()
-    train_path = tmp_path / "train.jsonl"
+    manifest_dir = tmp_path / "manifests"
+    manifest_dir.mkdir(parents=True, exist_ok=True)
+    train_path = manifest_dir / "train.jsonl"
     train_path.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
 
     fold_map = assign_balanced_folds(rows, 4, seed=42)
     assert len(set(fold_map.values())) == 4
 
-    out_dir = tmp_path / "oof"
+    out_dir = manifest_dir / "oof"
     summary = build_oof_fold_manifests(train_path, out_dir, num_folds=4, seed=42)
     assert summary["total_train_pages"] == len(rows)
     assert len(summary["folds"]) == 4
     assert all(f["passed"] for f in summary["folds"])
     assert sum(f["holdout_pages"] for f in summary["folds"]) == len(rows)
+
+    sample_oof_row = json.loads((out_dir / "oof_fold0_train.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert sample_oof_row["image_path"].startswith("../../pages/")
+    assert (out_dir / sample_oof_row["image_path"]).resolve().parent == tmp_path / "pages"
 
     bad_name = tmp_path / "val.jsonl"
     bad_name.write_text(train_path.read_text(encoding="utf-8"), encoding="utf-8")

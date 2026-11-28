@@ -105,9 +105,11 @@ if [[ "${RESOLVED_EP}" -gt 1 ]]; then
 fi
 
 "${PYTHON_BIN}" "${REPO_ROOT}/scripts/validate_halo_configs.py" --config-dir "${RUN_CFG_DIR}" --halo-repo "${HALO_DIR}"
-"${PYTHON_BIN}" "${REPO_ROOT}/scripts/stage_gemma4_highres.py" \
-  --model "${HF_REPO}" --revision "${HF_REV}" --out-dir "${STAGED_BASE}" --max-soft-tokens 1120 \
-  --chat-template "${REPO_ROOT}/configs/halo/templates/gemma4_htr_nothink.jinja"
+if [[ "${STAGE}" == "sft" || "${USE_PEFT}" != "true" ]]; then
+  "${PYTHON_BIN}" "${REPO_ROOT}/scripts/stage_gemma4_highres.py" \
+    --model "${HF_REPO}" --revision "${HF_REV}" --out-dir "${STAGED_BASE}" --max-soft-tokens 1120 \
+    --chat-template "${REPO_ROOT}/configs/halo/templates/gemma4_htr_nothink.jinja"
+fi
 
 TRAIN_SCRIPT="${HALO_DIR}/scripts/training/sft.py"
 [[ "${STAGE}" == "smpo" ]] && TRAIN_SCRIPT="${HALO_DIR}/scripts/training/preference/smpo.py"
