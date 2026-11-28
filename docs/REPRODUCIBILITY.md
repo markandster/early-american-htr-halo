@@ -138,6 +138,11 @@ STAGE=sft MODEL_SIZE=26b_a4b DATASET_DIR=data/halo_vlm_sft HALO_DIR=/tmp/halo NU
 # Fallback Dense: 31B LoRA (H200/B200 or 2x GPU FSDP)
 STAGE=sft MODEL_SIZE=31b DATASET_DIR=data/halo_vlm_sft HALO_DIR=/tmp/halo NUM_GPUS=2 \
   bash scripts/run_gemma4_halo.sh
+
+# Optional: back up a merged BF16 checkpoint/adapter off ephemeral pods to a private Hugging Face repo (requires HF_TOKEN):
+python scripts/backup_checkpoint_hf.py \
+  --checkpoint-dir checkpoints/gemma4-12b-eahtr-sft-merged \
+  --repo-id <your-hf-user>/eahtr-gemma4-12b-sft
 ```
 
 ### Step D.2 — Conditional `Inkling-2-Small` Export, Training (`EP=8`), and `vLLM` Serving
