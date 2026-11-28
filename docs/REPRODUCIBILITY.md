@@ -111,6 +111,17 @@ python scripts/build_loc_challenge.py \
 
 ### Step D — Stage 1 Gemma 4 Halo SFT & Parity Export (`12b`, `26b_a4b`, `31b`)
 
+First run pre-flight pod readiness verification (GPU VRAM/driver, free NVMe disk, Python versions, Tier-2 Halo config check, and staged Arrow datasets/manifests):
+
+```bash
+python scripts/preflight_pod.py \
+  --work-dir . --halo-repo /tmp/halo \
+  --dataset-dir data/halo_vlm_sft \
+  --dataset-dir data/halo_vlm_sft_sham \
+  --manifest data/revcity/manifests/val.jsonl \
+  --manifest data/revcity/manifests/test_public.jsonl
+```
+
 `scripts/run_gemma4_halo.sh` writes each run to a fresh `RUN_ID`-stamped directory (refusing stale non-empty outputs unless `RESUME=1`, which sets `resume_from_checkpoint: true`), validates the resolved YAML in an isolated folder, enforces `EP` / `NUM_GPUS` parity, and either merges PEFT adapters (`12b`, `31b`) or verifies `RESOLVE_CKPT` parity and converts `fp32_experts` full checkpoints via Halo's `convert_to_bf16.py --verify` (`26b_a4b`, budget `~400 GB` disk because checkpoint rotation briefly holds two `97 GB` checkpoints):
 
 ```bash
@@ -209,9 +220,16 @@ python scripts/build_oof_folds.py \
 python scripts/generate_halo_rollouts.py \
   --model-dir checkpoints/gemma4-12b-eahtr-sft-oof0-merged \
   --train-jsonl data/revcity/manifests/oof/oof_fold0_holdout.jsonl \
-  --out-pref-jsonl data/pref_train.jsonl \
-  --out-rollouts-jsonl data/raw_rollouts.jsonl \
+  --out-pref-jsonl data/pref_fold0.jsonl \
+  --out-rollouts-jsonl data/raw_rollouts_fold0.jsonl \
   --source-fold fold0
+
+# After generating pref_fold{0..3}.jsonl across all 4 held-out folds, merge and leakage-audit against val/test:
+python scripts/merge_oof_preferences.py \
+  --inputs data/pref_fold0.jsonl data/pref_fold1.jsonl data/pref_fold2.jsonl data/pref_fold3.jsonl \
+  --out-jsonl data/pref_train.jsonl \
+  --eval-manifests manifests/val.jsonl manifests/test_public.jsonl \
+  --out-summary data/pref_train_audit.json
 
 python scripts/generate_halo_rollouts.py \
   --model-dir checkpoints/gemma4-12b-eahtr-sft-merged \

@@ -68,6 +68,7 @@ See [docs/TRAINING_PLAN.md](docs/TRAINING_PLAN.md) for the full competition trai
 ├── docs/
 │   ├── BACKGROUND.md             # Pre-competition prior HTR findings & design rationale
 │   ├── DATA_SHEET.md             # Corpus provenance, split breakdown, & reporting caveats
+│   ├── PROCESS_SUMMARY.md        # End-to-end engineering, Dec 1-10 execution plan & goals
 │   ├── REPRODUCIBILITY.md        # Clean-machine pinned setup & end-to-end rerun commands
 │   └── TRAINING_PLAN.md          # Full competition training plan & verification ledger
 ├── notebooks/
@@ -78,6 +79,8 @@ See [docs/TRAINING_PLAN.md](docs/TRAINING_PLAN.md) for the full competition trai
 │   ├── build_revcity_manifests.py # Standalone RevCity download, cleaning, splitting & audit CLI
 │   ├── build_loc_challenge.py    # Standalone LOC By the People challenge manifest builder
 │   ├── build_oof_folds.py        # Group-disjoint K-fold OOF manifest generator for Stage 2
+│   ├── merge_oof_preferences.py  # Multi-fold OOF preference merger & eval-leakage auditor
+│   ├── preflight_pod.py          # Dec 1 cloud pod GPU/disk/Halo/dataset pre-flight CLI
 │   ├── validate_halo_configs.py  # Two-tier Halo config validator (CI + --halo-repo CPU Tier-2)
 │   ├── stage_gemma4_highres.py   # Writable config + symlinked weight 1120-token Gemma 4 staging
 │   ├── export_halo_datasets.py   # Post-expansion VLM Arrow DatasetDict exporter (--sham supported)
